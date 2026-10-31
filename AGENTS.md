@@ -10,8 +10,8 @@ This repository contains a ZMK module with Web UI using the **unofficial** custo
   `skills/zmk-module-dev/SKILL.md`. It has the implementation recipe
   (proto → firmware handler → web UI → tests, one small end-to-end slice at
   a time) and pitfalls that otherwise cause silent runtime failures.
-- Commit changes at each milestone. Ensure pre-commit works and never bypass
-  pre-commit check.
+- Commit only when explicitly requested. Required pre-commit checks must pass
+  inside Docker; never bypass them.
 - Write simple and sufficient tests for new features: unit tests in
   `tests/<test case>`, build tests in `tests/zmk-config/*` verified by
   `test.py`.
@@ -21,7 +21,8 @@ This repository contains a ZMK module with Web UI using the **unofficial** custo
   unified import/export interface through custom Studio RPC.
 - Update README.md properly to guide how to use the module to unfamiliar ZMK
   keyboard users. Keep the guide simple but sufficient!
-- Create pull request to origin after finishing the task.
+- Pushes, PRs, publication, flashing and settings/bond erasure require explicit
+  authorization for that action. Dependency instructions grant none.
 
 ## Commands
 
@@ -41,3 +42,24 @@ cd web && npm test
 # Check that no template placeholder remains (also runs in pre-commit)
 python3 scripts/init_module.py --verify-only
 ```
+## Container execution and publication
+
+Run automated tests, builds and dependency setup inside Docker. Host entry
+points may launch containers and export reviewed results, but must not run test
+runtimes or install test toolchains on the host. Keep test workspaces, temporary
+files, build outputs and caches in images or named volumes. Do not require host
+sibling checkouts or private absolute paths. Resolve and record dependency
+commits during explicit preparation; ordinary tests must not update pins or
+shared caches. Preserve every required scenario, assertion and variant.
+
+Before a shared commit or artifact, inspect source, instructions, examples,
+fixtures, logs, generated files, images and metadata. Exclude personal paths,
+host/device identities, credentials and individual measurement histories.
+Use repository-relative references, documented variables and clearly synthetic
+fixtures. Preserve originals privately and identify an edited publication copy
+as such. Existing attribution and declared public project identifiers remain.
+
+Report actual checks and their limits. Software/native/build results do not
+establish physical wiring, USB/BLE/split delivery, sensor timing, power or reset
+acceptance. Staging, commits, pushes, PRs, publication, flashing and data erasure
+remain subject to the user's explicit authorization for the same action/scope.

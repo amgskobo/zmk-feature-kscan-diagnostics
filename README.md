@@ -1,7 +1,10 @@
 # zmk-feature-kscan-diagnostics
 
-![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-feature-kscan-diagnostics/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-kscan-diagnostics/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-feature-kscan-diagnostics/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-kscan-diagnostics/actions/workflows/devcontainer.yml)
+Maintenance fork of [cormoran/zmk-feature-kscan-diagnostics](https://github.com/cormoran/zmk-feature-kscan-diagnostics).
+The source baseline is `1432f7fe0cfe903cd7d3c9931ae6bd6f2e1f328e`.
+Firmware, protocol and existing test assertions are retained. Validation must
+identify the selected source and dependencies; a fork or a successful build
+does not establish physical wiring, timing or transport acceptance.
 
 ZMK module that helps you figure out why a keyboard is misbehaving —
 keys that don't register, keys that fire twice, or a whole row/column that's
@@ -69,10 +72,12 @@ Optional, but recommended if you can add it:
      remotes:
        - name: cormoran
          url-base: https://github.com/cormoran
+       - name: amgskobo
+         url-base: https://github.com/amgskobo
      projects:
        - name: zmk-feature-kscan-diagnostics
-         remote: cormoran
-         revision: main
+         remote: amgskobo
+         revision: 1432f7fe0cfe903cd7d3c9931ae6bd6f2e1f328e
          import: true
        # Optional: live key-press visualization in the web UI (see above)
        - name: zmk-feature-input-stream
@@ -335,4 +340,4 @@ Actions for github copilot and claude are available.
 
 - Mention `@copilot`
 - Setup `ANTHROPIC_API_KEY` secret and mention `@claude`
-  - Or fix [claude.yml](./github/workflows/claude.yml) to use `CLAUDE_CODE_OAUTH_TOKEN`
+  - Or fix [claude.yml](./.github/workflows/claude.yml) to use `CLAUDE_CODE_OAUTH_TOKEN`
