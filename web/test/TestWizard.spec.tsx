@@ -74,7 +74,9 @@ describe("TestWizard", () => {
       />
     );
 
-    fireEvent.click(screen.getByText("Start test"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
     expect(screen.getByText(/Coverage pass/i)).toBeInTheDocument();
 
     // Simulate 8 of 9 keys pressed via live events (position 4 missed).
@@ -156,7 +158,9 @@ describe("TestWizard", () => {
       />
     );
 
-    fireEvent.click(screen.getByText("Start test"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
     fireEvent.click(screen.getByText(/Done pressing/i));
     await act(async () => {
       fireEvent.click(screen.getByText(/Done retesting/i));
@@ -180,5 +184,344 @@ describe("TestWizard", () => {
       />
     );
     expect(onCoverageChange).toHaveBeenCalled();
+  });
+});
+
+const saturationCases = (
+  [
+    "presses",
+    "releases",
+    "repressLt5",
+    "repressLt10",
+    "repressLt20",
+    "repressLt50",
+  ] as const
+).flatMap((field) =>
+  [false, true].map((liveAvailable) => ({ field, liveAvailable }))
+);
+
+describe("counter saturation during a run", () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it.each(saturationCases)(
+    "invalidates $field saturation (live=$liveAvailable)",
+    async ({ field, liveAvailable }) => {
+      jest.useFakeTimers();
+      const baseline = makeStatsMap(2, () => 0);
+      baseline.get(0)![field] = 0xfffe;
+      const after = makeStatsMap(2, () => 0);
+      after.get(0)![field] = 0xffff;
+      const fetchStats = jest
+        .fn()
+        .mockResolvedValueOnce(baseline)
+        .mockResolvedValue(after);
+      render(
+        <TestWizard
+          cells={makeCells(2)}
+          fetchStats={fetchStats}
+          liveEvents={[]}
+          liveAvailable={liveAvailable}
+        />
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByText("Start test"));
+      });
+      if (liveAvailable) {
+        fireEvent.click(screen.getByText(/Done pressing/));
+        await act(async () => {
+          fireEvent.click(screen.getByText(/Done retesting/));
+        });
+        expect(screen.getByText(/Done retesting/)).toBeDisabled();
+      } else {
+        await act(async () => {
+          jest.advanceTimersByTime(600);
+        });
+        expect(screen.getByText(/Done pressing/)).toBeDisabled();
+      }
+      expect(screen.getByText(/Counters are saturated/)).toBeInTheDocument();
+      expect(screen.queryByText(/Chatter check/)).not.toBeInTheDocument();
+    }
+  );
+
+  it("ignores saturated counters for positions outside the tested layout", async () => {
+    const baseline = makeStatsMap(3, (position) =>
+      position === 2 ? 0xffff : 0
+    );
+    const after = makeStatsMap(3, (position) => (position === 2 ? 0xffff : 1));
+    const fetchStats = jest
+      .fn()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValue(after);
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={true}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    fireEvent.click(screen.getByText(/Done pressing/));
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Done retesting/));
+    });
+    expect(screen.getByText(/Chatter check/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Counters are saturated/)
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("wizard session snapshots", () => {
+  it("reconciles overlapping statistics and live events before diagnosis", async () => {
+    jest.useFakeTimers();
+    try {
+      const cells = makeCells(9);
+      const snapshot = makeStatsMap(9, (position) => (position < 6 ? 2 : 1));
+      const fetchStats = jest
+        .fn()
+        .mockResolvedValueOnce(makeStatsMap(9, () => 0))
+        .mockResolvedValue(snapshot);
+      const onCoverageChange = jest.fn();
+      const view = (
+        liveAvailable: boolean,
+        liveEvents: DiagnosisKeyEvent[]
+      ) => (
+        <TestWizard
+          cells={cells}
+          fetchStats={fetchStats}
+          liveEvents={liveEvents}
+          liveAvailable={liveAvailable}
+          onCoverageChange={onCoverageChange}
+        />
+      );
+      const { rerender } = render(view(false, []));
+      await act(async () => {
+        fireEvent.click(screen.getByText("Start test"));
+      });
+      await act(async () => {
+        jest.advanceTimersByTime(600);
+      });
+      expect(screen.getByText(/9 \/ 9 seen/)).toBeInTheDocument();
+
+      // Activation can deliver events already included in the last stats page.
+      rerender(
+        view(
+          true,
+          [5, 4, 3, 2, 1, 0].map((position) => ({
+            position,
+            pressed: true,
+            receivedAt: 1000,
+          }))
+        )
+      );
+      fireEvent.click(screen.getByText(/Done pressing/));
+      await act(async () => {
+        fireEvent.click(screen.getByText(/Done retesting/));
+      });
+      fireEvent.click(screen.getByText("Generate report"));
+      expect(screen.getByText(/No faults detected/)).toBeInTheDocument();
+      const final = onCoverageChange.mock.lastCall![0];
+      expect(final.get(0).pressCount).toBe(2);
+      expect(final.get(8).pressCount).toBe(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it.each([true, false])(
+    "captures a baseline before coverage (live=%s)",
+    async (liveAvailable) => {
+      const fetchStats = jest.fn().mockResolvedValue(makeStatsMap(2, () => 0));
+      render(
+        <TestWizard
+          cells={makeCells(2)}
+          fetchStats={fetchStats}
+          liveEvents={[]}
+          liveAvailable={liveAvailable}
+        />
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByText("Start test"));
+      });
+      expect(fetchStats).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Coverage pass/)).toBeInTheDocument();
+    }
+  );
+
+  it("consumes a new event when a full history replaces its oldest entry", async () => {
+    const cells = makeCells(2);
+    const history: DiagnosisKeyEvent[] = Array.from(
+      { length: 500 },
+      (_, i) => ({
+        position: 0,
+        pressed: false,
+        receivedAt: 500 - i,
+      })
+    );
+    const fetchStats = jest.fn().mockResolvedValue(makeStatsMap(2, () => 0));
+    const view = (events: DiagnosisKeyEvent[]) => (
+      <TestWizard
+        cells={cells}
+        fetchStats={fetchStats}
+        liveEvents={events}
+        liveAvailable={true}
+      />
+    );
+    const { rerender } = render(view(history));
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    rerender(
+      view([
+        { position: 1, pressed: true, receivedAt: 1000 },
+        ...history.slice(0, 499),
+      ])
+    );
+    expect(screen.getByText(/1 \/ 2 seen/)).toBeInTheDocument();
+    // The same retained prefix must not count again on a phase transition.
+    fireEvent.click(screen.getByText(/Done pressing/));
+    expect(screen.getByText(/Retest pass/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Press each of these positions 5 times/)
+    ).toHaveTextContent("0");
+  });
+
+  it("keeps a failed baseline out of coverage and allows retry", async () => {
+    const fetchStats = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Synthetic statistics failure"))
+      .mockResolvedValue(makeStatsMap(2, () => 0));
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={true}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    expect(screen.queryByText(/Coverage pass/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Synthetic statistics failure")
+    ).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    expect(screen.getByText(/Coverage pass/)).toBeInTheDocument();
+  });
+
+  it("requires a new baseline after counters reset", async () => {
+    const fetchStats = jest
+      .fn()
+      .mockResolvedValueOnce(makeStatsMap(2, () => 3))
+      .mockResolvedValue(makeStatsMap(2, () => 0));
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={true}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    fireEvent.click(screen.getByText(/Done pressing/));
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Done retesting/));
+    });
+    expect(screen.getByText(/Counters were reset/)).toBeInTheDocument();
+    expect(screen.queryByText(/Chatter check/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Start over"));
+    expect(screen.getByText("Start test")).toBeEnabled();
+  });
+
+  it("explains saturated counters before starting a test", async () => {
+    const fetchStats = jest
+      .fn()
+      .mockResolvedValue(makeStatsMap(2, () => 0xffff));
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={true}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    expect(screen.getByText(/Counters are saturated/)).toBeInTheDocument();
+    expect(screen.queryByText(/Coverage pass/)).not.toBeInTheDocument();
+  });
+
+  it("does not revive a retired run when its final read completes late", async () => {
+    let complete!: (value: StatsByPosition) => void;
+    const pending = new Promise<StatsByPosition>((resolve) => {
+      complete = resolve;
+    });
+    const fetchStats = jest
+      .fn()
+      .mockResolvedValueOnce(makeStatsMap(2, () => 0))
+      .mockReturnValueOnce(pending);
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={true}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    fireEvent.click(screen.getByText(/Done pressing/));
+    fireEvent.click(screen.getByText(/Done retesting/));
+    fireEvent.click(screen.getByText("Start over"));
+    await act(async () => {
+      complete(makeStatsMap(2, () => 1));
+    });
+    expect(screen.getByText("Start test")).toBeInTheDocument();
+    expect(screen.queryByText(/Chatter check/)).not.toBeInTheDocument();
+  });
+
+  it("keeps one fallback poll in flight at a time", async () => {
+    jest.useFakeTimers();
+    let complete!: (value: StatsByPosition) => void;
+    const pending = new Promise<StatsByPosition>((resolve) => {
+      complete = resolve;
+    });
+    const fetchStats = jest
+      .fn()
+      .mockResolvedValueOnce(makeStatsMap(2, () => 0))
+      .mockReturnValueOnce(pending)
+      .mockResolvedValue(makeStatsMap(2, () => 1));
+    render(
+      <TestWizard
+        cells={makeCells(2)}
+        fetchStats={fetchStats}
+        liveEvents={[]}
+        liveAvailable={false}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByText("Start test"));
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(1600);
+    });
+    expect(fetchStats).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      complete(makeStatsMap(2, () => 1));
+    });
+    expect(screen.getByText(/2 \/ 2 seen/)).toBeInTheDocument();
+    jest.useRealTimers();
   });
 });

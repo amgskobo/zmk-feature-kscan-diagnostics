@@ -1,12 +1,15 @@
 /**
- * Feature-detects zmk-feature-input-stream's custom RPC subsystem
- * (`zmk__input_stream`, SECURED — DESIGN.md §2/§7) and, when present and
- * unlocked, enables the live key-event stream and exposes a rolling event
- * log. Must degrade gracefully (not crash/hang) when the subsystem is
- * missing or the device is locked, so callers (TestWizard) can fall back to
- * stats-diff polling.
+ * Own the optional input-stream subscription for one connection/subsystem.
+ * Coverage keeps using statistics until EnableStream has actually succeeded.
  */
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { MetaError } from "@zmkfirmware/zmk-studio-ts-client";
 import { ErrorConditions } from "@zmkfirmware/zmk-studio-ts-client/meta";
 import type { CustomNotification } from "@zmkfirmware/zmk-studio-ts-client/custom";
@@ -28,26 +31,54 @@ export interface KeyEvent {
   behaviorId: number;
   param1: number;
   param2: number;
-  /**
-   * Browser receive time (`performance.now()`), NOT a firmware timestamp:
-   * input-stream notifications carry no timestamp and the queue drops
-   * silently when full (DESIGN.md §1 limitation 2). Good enough for live
-   * visualization; never use this for chatter/timing analysis — that comes
-   * from this module's own stats RPC.
-   */
+  /** Browser receive time for visualization, never firmware timing evidence. */
   receivedAt: number;
 }
 
 const MAX_EVENT_LOG = 500;
 
-export interface UseInputStreamReturn {
-  /** Whether the `zmk__input_stream` subsystem was found on the device. */
-  available: boolean;
-  /** True once an RPC call against this subsystem failed with UNLOCK_REQUIRED. */
+interface Session {
+  service: ZMKCustomSubsystem | null;
+  active: boolean;
+  request: number;
+  wantsStream: boolean;
+  accepting: boolean;
+}
+
+interface StreamState {
+  owner: ZMKCustomSubsystem | null;
   locked: boolean;
   enabled: boolean;
+  isLoading: boolean;
   error: string | null;
   events: KeyEvent[];
+  pressedPositions: Set<number>;
+  activeLayer: number;
+}
+
+function initialState(owner: ZMKCustomSubsystem | null): StreamState {
+  return {
+    owner,
+    locked: false,
+    enabled: false,
+    isLoading: false,
+    error: null,
+    events: [],
+    pressedPositions: new Set(),
+    activeLayer: 0,
+  };
+}
+
+export interface UseInputStreamReturn {
+  available: boolean;
+  locked: boolean;
+  enabled: boolean;
+  isLoading: boolean;
+  error: string | null;
+  /** Newest first; retained events keep their object identity across updates. */
+  events: KeyEvent[];
+  /** Current held keys, independent of the bounded event history. */
+  pressedPositions: Set<number>;
   activeLayer: number;
   enable: () => Promise<void>;
   disable: () => Promise<void>;
@@ -57,134 +88,191 @@ export interface UseInputStreamReturn {
 export function useInputStream(): UseInputStreamReturn {
   const zmkApp = useContext(ZMKAppContext);
   const connection = zmkApp?.state.connection ?? null;
-  const subsystem =
-    zmkApp?.findSubsystem(INPUT_STREAM_SUBSYSTEM_IDENTIFIER) ?? null;
-
-  const [locked, setLocked] = useState(false);
-  const [enabled, setEnabled] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [events, setEvents] = useState<KeyEvent[]>([]);
-  const [activeLayer, setActiveLayer] = useState(0);
-
-  // Best-effort disableStream on unmount / page close.
-  const connectionRef = useRef(connection);
-  const subsystemIndexRef = useRef<number | null>(subsystem?.index ?? null);
-  const enabledRef = useRef(false);
-  useEffect(() => {
-    connectionRef.current = connection;
-  }, [connection]);
-  useEffect(() => {
-    subsystemIndexRef.current = subsystem?.index ?? null;
-  }, [subsystem]);
-  useEffect(() => {
-    enabledRef.current = enabled;
-  }, [enabled]);
-
-  const sendRequest = useCallback(
-    async (request: Request): Promise<Response | null> => {
-      if (!connection || subsystem === null) return null;
-      try {
-        const service = new ZMKCustomSubsystem(connection, subsystem.index);
-        const payload = Request.encode(request).finish();
-        const respPayload = await service.callRPC(payload);
-        setLocked(false);
-        if (!respPayload) return null;
-        const resp = Response.decode(respPayload);
-        if (resp.error) {
-          setError(resp.error.message);
-          return resp;
-        }
-        setError(null);
-        return resp;
-      } catch (e) {
-        if (
-          e instanceof MetaError &&
-          e.condition === ErrorConditions.UNLOCK_REQUIRED
-        ) {
-          setLocked(true);
-        } else {
-          setError(e instanceof Error ? e.message : "Unknown error");
-        }
-        return null;
-      }
+  const subsystemIndex = zmkApp?.findSubsystem(
+    INPUT_STREAM_SUBSYSTEM_IDENTIFIER
+  )?.index;
+  const service = useMemo(
+    () =>
+      connection && subsystemIndex !== undefined
+        ? new ZMKCustomSubsystem(connection, subsystemIndex)
+        : null,
+    [connection, subsystemIndex]
+  );
+  const lifetime = useRef<Session>({
+    service,
+    active: true,
+    request: 0,
+    wantsStream: false,
+    accepting: false,
+  });
+  const [stored, setStored] = useState(() => initialState(service));
+  const state = stored.owner === service ? stored : initialState(service);
+  const update = useCallback(
+    (change: (current: StreamState) => StreamState) => {
+      setStored((previous) => {
+        const session = lifetime.current;
+        if (!session.active || session.service !== service) return previous;
+        return change(
+          previous.owner === service ? previous : initialState(service)
+        );
+      });
     },
-    [connection, subsystem]
+    [service]
   );
 
-  const enable = useCallback(async () => {
-    const resp = await sendRequest(Request.create({ enableStream: {} }));
-    if (resp && !resp.error) setEnabled(true);
-  }, [sendRequest]);
-
-  const disable = useCallback(async () => {
-    const resp = await sendRequest(Request.create({ disableStream: {} }));
-    if (resp && !resp.error) setEnabled(false);
-    else if (!resp) setEnabled(false);
-  }, [sendRequest]);
+  const setStreaming = useCallback(
+    async (enable: boolean) => {
+      const session = lifetime.current;
+      if (!session.active || !service || session.service !== service) return;
+      const ticket = ++session.request;
+      const owns = () =>
+        session.active &&
+        session.service === service &&
+        session.request === ticket;
+      session.accepting = enable;
+      if (enable) session.wantsStream = true;
+      update((s) => ({
+        ...s,
+        enabled: false,
+        isLoading: true,
+        locked: false,
+        error: null,
+        pressedPositions: new Set(),
+      }));
+      try {
+        const request = Request.create(
+          enable ? { enableStream: {} } : { disableStream: {} }
+        );
+        const payload = await service.callRPC(Request.encode(request).finish());
+        if (!owns()) return;
+        if (!payload) throw new Error("Empty input-stream response");
+        const response = Response.decode(payload);
+        if (response.error)
+          throw new Error(response.error.message || "Input stream failed");
+        if (!response.ok)
+          throw new Error("Missing input-stream acknowledgement");
+        if (!enable) session.wantsStream = false;
+        update((s) => ({ ...s, enabled: enable, isLoading: false }));
+      } catch (error) {
+        if (!owns()) return;
+        session.accepting = false;
+        const locked =
+          error instanceof MetaError &&
+          error.condition === ErrorConditions.UNLOCK_REQUIRED;
+        update((s) => ({
+          ...s,
+          enabled: false,
+          isLoading: false,
+          locked,
+          error: locked
+            ? null
+            : error instanceof Error
+              ? error.message
+              : "Input stream failed",
+          pressedPositions: new Set(),
+        }));
+      }
+    },
+    [service, update]
+  );
+  const enable = useCallback(() => setStreaming(true), [setStreaming]);
+  const disable = useCallback(() => setStreaming(false), [setStreaming]);
 
   useEffect(() => {
-    const handler = () => {
-      const conn = connectionRef.current;
-      const idx = subsystemIndexRef.current;
-      if (!enabledRef.current || !conn || idx === null) return;
-      const service = new ZMKCustomSubsystem(conn, idx);
-      const payload = Request.encode(
-        Request.create({ disableStream: {} })
-      ).finish();
-      void service.callRPC(payload);
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, []);
-
-  useEffect(() => {
-    if (!zmkApp || !subsystem) return;
+    if (!zmkApp || subsystemIndex === undefined) return;
+    let active = true;
     const unsubscribe = zmkApp.onNotification({
       type: "custom",
-      subsystemIndex: subsystem.index,
-      callback: (notif: CustomNotification) => {
+      subsystemIndex,
+      callback: (notification: CustomNotification) => {
+        const session = lifetime.current;
+        if (
+          !active ||
+          !session.active ||
+          !session.accepting ||
+          session.service !== service
+        )
+          return;
         try {
-          const decoded = Notification.decode(notif.payload);
+          const decoded = Notification.decode(notification.payload);
           if (decoded.keyEvent) {
-            const { position, pressed, behaviorId, param1, param2 } =
-              decoded.keyEvent;
-            setEvents((prev) => {
-              const next: KeyEvent[] = [
-                {
-                  position,
-                  pressed,
-                  behaviorId,
-                  param1,
-                  param2,
-                  receivedAt: performance.now(),
-                },
-                ...prev,
-              ];
-              return next.length > MAX_EVENT_LOG
-                ? next.slice(0, MAX_EVENT_LOG)
-                : next;
+            const event = {
+              ...decoded.keyEvent,
+              receivedAt: performance.now(),
+            };
+            update((s) => {
+              const held = new Set(s.pressedPositions);
+              if (event.pressed) held.add(event.position);
+              else held.delete(event.position);
+              return {
+                ...s,
+                events: [event, ...s.events].slice(0, MAX_EVENT_LOG),
+                pressedPositions: held,
+              };
             });
           }
           if (decoded.layerChange) {
-            setActiveLayer(decoded.layerChange.layerIndex);
+            const layer = decoded.layerChange.layerIndex;
+            update((s) => ({ ...s, activeLayer: layer }));
           }
         } catch {
-          // Ignore malformed notifications rather than crashing the page.
+          // A malformed notification must not retire the working subscription.
         }
       },
     });
-    return unsubscribe;
-  }, [zmkApp, subsystem]);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [zmkApp, subsystemIndex, service, update]);
 
-  const clearEvents = useCallback(() => setEvents([]), []);
+  useEffect(() => {
+    const session = lifetime.current;
+    session.service = service;
+    session.active = true;
+    session.wantsStream = false;
+    session.accepting = false;
+    const stop = () => {
+      if (session.service !== service) return;
+      session.accepting = false;
+      if (!session.wantsStream || !service) return;
+      session.wantsStream = false;
+      const payload = Request.encode(
+        Request.create({ disableStream: {} })
+      ).finish();
+      // Capture this session's service, including while EnableStream is pending.
+      void service.callRPC(payload).catch(() => {});
+    };
+    const beforeUnload = () => {
+      session.request++;
+      stop();
+      update((s) => ({
+        ...s,
+        enabled: false,
+        isLoading: false,
+        pressedPositions: new Set(),
+      }));
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    void enable();
+    return () => {
+      if (session.service === service) {
+        session.active = false;
+        session.request++;
+      }
+      window.removeEventListener("beforeunload", beforeUnload);
+      stop();
+    };
+  }, [service, enable, update]);
+
+  const clearEvents = useCallback(
+    () => update((s) => ({ ...s, events: [] })),
+    [update]
+  );
 
   return {
-    available: subsystem !== null,
-    locked,
-    enabled,
-    error,
-    events,
-    activeLayer,
+    ...state,
+    available: service !== null,
     enable,
     disable,
     clearEvents,

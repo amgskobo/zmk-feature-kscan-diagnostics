@@ -35,9 +35,42 @@ export interface TestWizardProps {
 }
 
 const POLL_INTERVAL_MS = 500;
+const COUNTERS = [
+  "presses",
+  "releases",
+  "repressLt5",
+  "repressLt10",
+  "repressLt20",
+  "repressLt50",
+] as const;
 
-function pressCountFor(stats: StatsByPosition, position: number): number {
-  return stats.get(position)?.presses ?? 0;
+class SessionCountersError extends Error {}
+
+function assertNotSaturated(
+  snapshot: StatsByPosition,
+  positions: readonly number[]
+) {
+  for (const position of positions) {
+    const entry = snapshot.get(position);
+    if (entry && COUNTERS.some((field) => entry[field] >= 0xffff))
+      throw new SessionCountersError(
+        "Counters are saturated. Reset counters before starting a new test."
+      );
+  }
+}
+
+function assertCounters(current: StatsByPosition, baseline: StatsByPosition) {
+  for (const [position, before] of baseline) {
+    const after = current.get(position);
+    if (!after)
+      throw new SessionCountersError(
+        "Incomplete statistics. Start a new test."
+      );
+    if (COUNTERS.some((field) => after[field] < before[field]))
+      throw new SessionCountersError(
+        "Counters were reset during this test. Start a new test."
+      );
+  }
 }
 
 export function TestWizard({
@@ -58,8 +91,24 @@ export function TestWizard({
   const [chatterBucket, setChatterBucket] = useState<ChatterBucket>("lt50");
   const [findings, setFindings] = useState<Finding[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [invalidCounters, setInvalidCounters] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const lifetime = useRef({ active: true, revision: 0, busy: false });
+  const eventsRef = useRef(liveEvents);
+  const lastSeenEvent = useRef<DiagnosisKeyEvent | null>(null);
 
-  const liveEventsSeenCountRef = useRef(0);
+  useEffect(() => {
+    const current = lifetime.current;
+    current.active = true;
+    return () => {
+      current.active = false;
+      current.revision++;
+    };
+  }, []);
+  useEffect(() => {
+    eventsRef.current = liveEvents;
+  }, [liveEvents]);
 
   const positionsUnderTest = useMemo(
     () => cells.map((c) => c.position),
@@ -68,8 +117,8 @@ export function TestWizard({
 
   const initCoverage = useCallback((): Map<number, PositionCoverage> => {
     const map = new Map<number, PositionCoverage>();
-    for (const p of positionsUnderTest) {
-      map.set(p, { position: p, status: "untested", pressCount: 0 });
+    for (const position of positionsUnderTest) {
+      map.set(position, { position, status: "untested", pressCount: 0 });
     }
     return map;
   }, [positionsUnderTest]);
@@ -78,69 +127,86 @@ export function TestWizard({
     onCoverageChange?.(coverage);
   }, [coverage, onCoverageChange]);
 
-  const markSeen = useCallback((position: number) => {
-    setCoverage((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(position) ?? {
-        position,
-        status: "untested",
-        pressCount: 0,
-      };
-      next.set(position, {
-        ...existing,
-        status: "seen",
-        pressCount: existing.pressCount + 1,
-      });
-      return next;
-    });
-  }, []);
-
-  // Live-event-driven coverage: consume new entries appended to liveEvents
-  // (useInputStream prepends newest-first, so only scan the prefix we
-  // haven't processed yet).
+  // Retained objects are stable even after the 500-entry log stops growing.
   useEffect(() => {
     if (phase !== "coverage" && phase !== "retest") return;
     if (!liveAvailable) return;
-    const newCount = liveEvents.length - liveEventsSeenCountRef.current;
-    if (newCount <= 0) {
-      liveEventsSeenCountRef.current = liveEvents.length;
-      return;
-    }
-    const newOnes = liveEvents.slice(0, newCount);
-    liveEventsSeenCountRef.current = liveEvents.length;
-    for (const ev of newOnes) {
-      if (ev.pressed) markSeen(ev.position);
-    }
-  }, [liveEvents, liveAvailable, phase, markSeen]);
+    const boundary = lastSeenEvent.current;
+    const boundaryIndex = boundary ? liveEvents.indexOf(boundary) : -1;
+    const added =
+      boundaryIndex >= 0 ? liveEvents.slice(0, boundaryIndex) : liveEvents;
+    lastSeenEvent.current = liveEvents[0] ?? null;
+    if (added.length === 0) return;
+    setCoverage((previous) => {
+      const next = new Map(previous);
+      for (const event of added) {
+        const current = next.get(event.position);
+        if (!event.pressed || !current) continue;
+        next.set(event.position, {
+          ...current,
+          status: "seen",
+          pressCount: current.pressCount + 1,
+        });
+      }
+      return next;
+    });
+  }, [liveEvents, liveAvailable, phase]);
 
-  // Stats-diff polling fallback when live events are unavailable.
+  const applyStatsCoverage = useCallback(
+    (current: StatsByPosition) => {
+      if (!statsBaseline) return;
+      assertNotSaturated(current, positionsUnderTest);
+      assertCounters(current, statsBaseline);
+      setCoverage((previous) => {
+        const next = new Map(previous);
+        for (const [position, value] of previous) {
+          if (!current.has(position) || !statsBaseline.has(position)) continue;
+          const count =
+            (current.get(position)?.presses ?? 0) -
+            (statsBaseline.get(position)?.presses ?? 0);
+          // A stream activation can overlap the last statistics page. Use the
+          // firmware delta to reconcile counts before making a diagnosis.
+          next.set(position, {
+            ...value,
+            status: count > 0 ? "seen" : value.status,
+            pressCount: count,
+          });
+        }
+        return next;
+      });
+    },
+    [statsBaseline, positionsUnderTest]
+  );
+
   useEffect(() => {
-    if (liveAvailable) return;
+    if (liveAvailable || invalidCounters) return;
     if (phase !== "coverage" && phase !== "retest") return;
     if (!statsBaseline) return;
+    const current = lifetime.current;
+    const ticket = current.revision;
     let cancelled = false;
+    let pending = false;
+    const owns = () =>
+      !cancelled && current.active && current.revision === ticket;
     const id = setInterval(() => {
+      if (pending || current.busy || !owns()) return;
+      pending = true;
       void (async () => {
         try {
-          const current = await fetchStats();
-          if (cancelled) return;
-          setCoverage((prev) => {
-            const next = new Map(prev);
-            for (const [position, cov] of prev) {
-              const before = pressCountFor(statsBaseline, position);
-              const now = pressCountFor(current, position);
-              if (now > before) {
-                next.set(position, {
-                  ...cov,
-                  status: "seen",
-                  pressCount: now - before,
-                });
-              }
-            }
-            return next;
-          });
-        } catch {
-          // transient poll failure; keep polling
+          const snapshot = await fetchStats();
+          if (!owns()) return;
+          applyStatsCoverage(snapshot);
+          setError(null);
+        } catch (failure) {
+          if (!owns()) return;
+          setError(
+            failure instanceof Error
+              ? failure.message
+              : "Statistics read failed"
+          );
+          if (failure instanceof SessionCountersError) setInvalidCounters(true);
+        } finally {
+          pending = false;
         }
       })();
     }, POLL_INTERVAL_MS);
@@ -148,23 +214,51 @@ export function TestWizard({
       cancelled = true;
       clearInterval(id);
     };
-  }, [liveAvailable, phase, statsBaseline, fetchStats]);
+  }, [
+    liveAvailable,
+    phase,
+    statsBaseline,
+    fetchStats,
+    applyStatsCoverage,
+    revision,
+    invalidCounters,
+  ]);
 
   const startCoverage = useCallback(async () => {
+    const current = lifetime.current;
+    if (current.busy) return;
+    current.busy = true;
+    const ticket = ++current.revision;
+    setRevision(ticket);
+    setIsBusy(true);
     setError(null);
-    liveEventsSeenCountRef.current = liveEvents.length;
-    setCoverage(initCoverage());
-    if (!liveAvailable) {
-      try {
-        setStatsBaseline(await fetchStats());
-      } catch (e) {
+    const owns = () => current.active && current.revision === ticket;
+    try {
+      // Chatter always needs a baseline, including when live view is enabled.
+      const baseline = await fetchStats();
+      if (!owns()) return;
+      assertNotSaturated(baseline, positionsUnderTest);
+      lastSeenEvent.current = eventsRef.current[0] ?? null;
+      setStatsBaseline(baseline);
+      setStatsAfter(null);
+      setCoverage(initCoverage());
+      setFindings([]);
+      setInvalidCounters(false);
+      setPhase("coverage");
+    } catch (failure) {
+      if (owns())
         setError(
-          e instanceof Error ? e.message : "Failed to fetch baseline stats"
+          failure instanceof Error
+            ? failure.message
+            : "Failed to fetch baseline statistics"
         );
+    } finally {
+      if (owns()) {
+        current.busy = false;
+        setIsBusy(false);
       }
     }
-    setPhase("coverage");
-  }, [initCoverage, liveAvailable, liveEvents.length, fetchStats]);
+  }, [fetchStats, initCoverage, positionsUnderTest]);
 
   const missedPositions = useMemo(
     () =>
@@ -175,11 +269,11 @@ export function TestWizard({
   );
 
   const finishCoverage = useCallback(() => {
-    setCoverage((prev) => {
-      const next = new Map(prev);
-      for (const [position, cov] of prev) {
-        if (cov.status === "untested")
-          next.set(position, { ...cov, status: "missed" });
+    setCoverage((previous) => {
+      const next = new Map(previous);
+      for (const [position, value] of previous) {
+        if (value.status === "untested")
+          next.set(position, { ...value, status: "missed" });
       }
       return next;
     });
@@ -187,22 +281,43 @@ export function TestWizard({
   }, []);
 
   const finishRetest = useCallback(async () => {
+    const current = lifetime.current;
+    if (current.busy || invalidCounters) return;
+    current.busy = true;
+    const ticket = ++current.revision;
+    setRevision(ticket);
+    setIsBusy(true);
     setError(null);
+    const owns = () => current.active && current.revision === ticket;
     try {
       const after = await fetchStats();
+      if (!owns()) return;
+      applyStatsCoverage(after);
       setStatsAfter(after);
       setPhase("chatter");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch stats");
+    } catch (failure) {
+      if (owns()) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "Failed to fetch statistics"
+        );
+        if (failure instanceof SessionCountersError) setInvalidCounters(true);
+      }
+    } finally {
+      if (owns()) {
+        current.busy = false;
+        setIsBusy(false);
+      }
     }
-  }, [fetchStats]);
+  }, [fetchStats, applyStatsCoverage, invalidCounters]);
 
   const runDiagnosis = useCallback(() => {
-    if (!statsAfter) return;
+    if (!statsAfter || !statsBaseline || invalidCounters) return;
     const result = diagnose({
       cells,
       coverage: [...coverage.values()],
-      statsBefore: statsBaseline ?? undefined,
+      statsBefore: statsBaseline,
       statsAfter,
       eventLog: liveEvents,
       chatterBucket,
@@ -218,15 +333,22 @@ export function TestWizard({
     liveEvents,
     chatterBucket,
     positionsUnderTest,
+    invalidCounters,
   ]);
 
   const restart = useCallback(() => {
+    const current = lifetime.current;
+    current.revision++;
+    current.busy = false;
+    setRevision(current.revision);
+    setIsBusy(false);
     setPhase("idle");
     setCoverage(new Map());
     setStatsBaseline(null);
     setStatsAfter(null);
     setFindings([]);
     setError(null);
+    setInvalidCounters(false);
   }, []);
 
   const seenCount = [...coverage.values()].filter(
@@ -249,9 +371,10 @@ export function TestWizard({
           </p>
           <button
             className="btn btn-primary"
+            disabled={isBusy}
             onClick={() => void startCoverage()}
           >
-            Start test
+            {isBusy ? "Preparing statistics…" : "Start test"}
           </button>
         </div>
       )}
@@ -263,7 +386,11 @@ export function TestWizard({
             Press every key once. {seenCount} / {positionsUnderTest.length}{" "}
             seen.
           </p>
-          <button className="btn btn-primary" onClick={finishCoverage}>
+          <button
+            className="btn btn-primary"
+            disabled={invalidCounters}
+            onClick={finishCoverage}
+          >
             Done pressing / show missed keys
           </button>
         </div>
@@ -282,6 +409,7 @@ export function TestWizard({
           )}
           <button
             className="btn btn-primary"
+            disabled={isBusy || invalidCounters}
             onClick={() => void finishRetest()}
           >
             Done retesting / continue
@@ -352,6 +480,11 @@ export function TestWizard({
             Start over
           </button>
         </div>
+      )}
+      {phase !== "idle" && phase !== "report" && (
+        <button className="btn btn-secondary" onClick={restart}>
+          Start over
+        </button>
       )}
     </div>
   );

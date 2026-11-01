@@ -74,7 +74,30 @@ function App() {
   );
 }
 
-function DiagnosticsSections() {
+const objectIds = new WeakMap<object, number>();
+let nextObjectId = 1;
+
+function objectIdentity(object: object | null | undefined) {
+  if (!object) return 0;
+  const identity = objectIds.get(object) ?? nextObjectId++;
+  objectIds.set(object, identity);
+  return identity;
+}
+
+export function DiagnosticsSections() {
+  const app = useContext(ZMKAppContext);
+  const connection = app?.state.connection;
+  const identity = objectIdentity(connection);
+  const diagnostics = app?.findSubsystem(SUBSYSTEM_IDENTIFIER)?.index;
+  const stream = app?.findSubsystem(INPUT_STREAM_SUBSYSTEM_IDENTIFIER)?.index;
+  return (
+    <DiagnosticsSession
+      key={[identity, diagnostics ?? "missing", stream ?? "missing"].join(":")}
+    />
+  );
+}
+
+function DiagnosticsSession() {
   const zmkApp = useContext(ZMKAppContext);
   const kscan = useKscanDiagnostics();
   const inputStream = useInputStream();
@@ -84,11 +107,25 @@ function DiagnosticsSections() {
   const [wizardCoverage, setWizardCoverage] = useState<
     Map<number, PositionCoverage>
   >(new Map());
+  const [counterResetRevision, setCounterResetRevision] = useState(0);
+  const [resettingCounters, setResettingCounters] = useState(false);
+
+  const resetCounters = () => {
+    // Retire the old baseline before sending a potentially destructive RPC,
+    // including when its acknowledgement or the following refresh fails.
+    setCounterResetRevision((revision) => revision + 1);
+    setWizardCoverage(new Map());
+    setResettingCounters(true);
+    void kscan
+      .resetStats()
+      .catch(() => {})
+      .finally(() => setResettingCounters(false));
+  };
 
   // Load everything once on connect.
   useEffect(() => {
     void kscan.loadTopology();
-    void kscan.loadStats();
+    void kscan.loadStats().catch(() => {});
     void officialKeymap.load();
     // Only re-run if the connection itself changes (findSubsystem/etc. are
     // stable per render already handled inside the hooks).
@@ -133,11 +170,11 @@ function DiagnosticsSections() {
       if (cov.status === "seen") states.set(position, "ok");
       else if (cov.status === "missed") states.set(position, "dead");
     }
-    for (const ev of inputStream.events) {
-      if (ev.pressed) states.set(ev.position, "pressed");
+    for (const position of inputStream.pressedPositions) {
+      states.set(position, "pressed");
     }
     return states;
-  }, [wizardCoverage, inputStream.events]);
+  }, [wizardCoverage, inputStream.pressedPositions]);
 
   if (!zmkApp) return null;
 
@@ -161,6 +198,32 @@ function DiagnosticsSections() {
           </div>
         </section>
       )}
+      {kscan.available && (
+        <section className="card">
+          {officialKeymap.unlockRequired && (
+            <p className="hint-text">
+              Unlock Studio, then reload diagnostics to read the keyboard
+              layout.
+            </p>
+          )}
+          {officialKeymap.error && (
+            <p className="error-message">{officialKeymap.error}</p>
+          )}
+          <button
+            className="btn btn-secondary"
+            disabled={
+              kscan.isLoading || officialKeymap.isLoading || resettingCounters
+            }
+            onClick={() => {
+              void kscan.loadTopology();
+              void kscan.loadStats().catch(() => {});
+              void officialKeymap.load();
+            }}
+          >
+            Reload diagnostics
+          </button>
+        </section>
+      )}
 
       {!inputStream.available && (
         <section className="card">
@@ -177,6 +240,23 @@ function DiagnosticsSections() {
             Studio is locked — bind &amp;studio_unlock to a key to enable the
             live event stream (falling back to stats-diff polling meanwhile).
           </p>
+        </section>
+      )}
+      {inputStream.available && !inputStream.enabled && (
+        <section className="card">
+          <p className="hint-text">
+            {inputStream.error
+              ? "Live view unavailable: " + inputStream.error + ". "
+              : ""}
+            Coverage uses stats polling until live view is enabled.
+          </p>
+          <button
+            className="btn btn-secondary"
+            disabled={inputStream.isLoading}
+            onClick={() => void inputStream.enable()}
+          >
+            {inputStream.isLoading ? "Enabling live view…" : "Enable live view"}
+          </button>
         </section>
       )}
 
@@ -196,13 +276,18 @@ function DiagnosticsSections() {
       {kscan.available && cells.length > 0 && (
         <section className="card">
           <h2>Test Wizard</h2>
-          <TestWizard
-            cells={cells}
-            fetchStats={kscan.loadStats}
-            liveEvents={inputStream.events}
-            liveAvailable={inputStream.available && !inputStream.locked}
-            onCoverageChange={setWizardCoverage}
-          />
+          {resettingCounters ? (
+            <p role="status">Resetting counters…</p>
+          ) : (
+            <TestWizard
+              key={`${objectIdentity(kscan.topology)}:${counterResetRevision}`}
+              cells={cells}
+              fetchStats={kscan.loadStats}
+              liveEvents={inputStream.events}
+              liveAvailable={inputStream.enabled}
+              onCoverageChange={setWizardCoverage}
+            />
+          )}
         </section>
       )}
 
@@ -211,9 +296,9 @@ function DiagnosticsSections() {
           <h2>Stats</h2>
           <StatsTable
             stats={kscan.stats}
-            onRefresh={() => void kscan.loadStats()}
-            onReset={() => void kscan.resetStats()}
-            isLoading={kscan.isLoading}
+            onRefresh={() => void kscan.loadStats().catch(() => {})}
+            onReset={resetCounters}
+            isLoading={kscan.isLoading || resettingCounters}
           />
         </section>
       )}

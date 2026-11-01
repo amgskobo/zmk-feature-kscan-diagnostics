@@ -442,11 +442,11 @@ and the central shuttles the request/reply over ZMK's split event-relay
 
 ```
 PC ──QueryPeripheral{req_id, payload=<encoded inner Request>}──► central RPC
-     central: raise ksd_relay_query(SELF) ──relay(KDq)──► peripheral(s)
+     central: raise ksd_relay_query(SELF) ──relay(K2q)──► peripheral(s)
        peripheral: ksd_relay_query re-raised locally (source stamped)
                  → decode inner Request → ksd_query_dispatch (own tables)
                  → encode inner Response → raise ksd_relay_reply(SELF)
-     peripheral ──relay(KDr)──► central: ksd_relay_reply re-raised (source=idx+1)
+     peripheral ──relay(K2r)──► central: ksd_relay_reply re-raised (source=idx+1)
        central: raise_zmk_studio_custom_notification(PeripheralEvent{source,
                 req_id, payload=<encoded inner Response>})
 PC ◄── PeripheralEvent notification (one per responding peripheral)
@@ -466,8 +466,12 @@ PC ◄── PeripheralEvent notification (one per responding peripheral)
   (1-based; central is 0) by the central-side relay HANDLE. The client
   correlates replies by `(source, req_id)` and tolerates duplicates/timeouts.
 - **Two relay carriers** (`include/cormoran/kscan_diagnostics/relay_events.h`):
-  `ksd_relay_query` (id `KDq`, central→peripheral) and `ksd_relay_reply`
-  (id `KDr`, peripheral→central), each holding `{source, req_id, len, data[]}`.
+  `ksd_relay_query` (id `K2q`, central→peripheral) and `ksd_relay_reply`
+  (id `K2r`, peripheral→central), each holding `{source, req_id, len, data[]}`.
+  The packed version 2 carriers retain the full uint32 RPC request ID. The old
+  `KDq`/`KDr` carriers narrowed it to a byte; distinct identifiers prevent a
+  mixed-version split from interpreting the new layout as the old one. Both
+  halves must use the same module revision; the public protobuf is unchanged.
   The whole struct is copied into the relay payload, so the reply's `data`
   (sized to the largest inner Response, ~180 B) forces
   `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256` (the relay transport chunks it

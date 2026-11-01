@@ -6,7 +6,14 @@
  * GetGpioPins/GetPositionMap into one assembled `Topology` object, and
  * exposes `getStats` (paged) / `resetStats`.
  */
-import { useCallback, useContext, useMemo, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ZMKAppContext,
   ZMKCustomSubsystem,
@@ -39,6 +46,24 @@ const MAX_PAGES = 2000;
 
 class KscanDiagnosticsRpcError extends Error {}
 
+function nextPageOffset(
+  expected: number,
+  offset: number,
+  count: number,
+  total: number
+): number {
+  if (
+    offset !== expected ||
+    offset > total ||
+    count > total - offset ||
+    (count === 0 && offset < total)
+  )
+    throw new KscanDiagnosticsRpcError(
+      "Incomplete or out-of-order response page"
+    );
+  return offset + count;
+}
+
 async function callRpc(
   service: ZMKCustomSubsystem,
   request: Request
@@ -70,10 +95,15 @@ async function fetchGpioPinsOfKind(
     if (!chunk)
       throw new KscanDiagnosticsRpcError("Unexpected response to GetGpioPins");
     pins.push(...chunk.pins);
-    offset = chunk.offset + chunk.pins.length;
-    if (chunk.pins.length === 0 || offset >= chunk.total) break;
+    offset = nextPageOffset(
+      offset,
+      chunk.offset,
+      chunk.pins.length,
+      chunk.total
+    );
+    if (offset >= chunk.total) return pins;
   }
-  return pins;
+  throw new KscanDiagnosticsRpcError("GPIO page limit exceeded");
 }
 
 /**
@@ -121,10 +151,15 @@ async function fetchPositionMap(
       // 0 = unmapped, otherwise position+1 (DESIGN.md §6).
       cells.push(cell === 0 ? null : cell - 1);
     }
-    offset = chunk.offset + chunk.cells.length;
-    if (chunk.cells.length === 0 || offset >= chunk.total) break;
+    offset = nextPageOffset(
+      offset,
+      chunk.offset,
+      chunk.cells.length,
+      chunk.total
+    );
+    if (offset >= chunk.total) return cells;
   }
-  return cells;
+  throw new KscanDiagnosticsRpcError("Position-map page limit exceeded");
 }
 
 async function fetchDevice(
@@ -232,10 +267,15 @@ async function fetchStats(
       };
       byPosition.set(entry.position, entry);
     }
-    offset = chunk.offset + chunk.entries.length;
-    if (chunk.entries.length === 0 || offset >= chunk.total) break;
+    offset = nextPageOffset(
+      offset,
+      chunk.offset,
+      chunk.entries.length,
+      chunk.total
+    );
+    if (offset >= chunk.total) return byPosition;
   }
-  return byPosition;
+  throw new KscanDiagnosticsRpcError("Statistics page limit exceeded");
 }
 
 export interface UseKscanDiagnosticsReturn {
@@ -261,62 +301,118 @@ export interface UseKscanDiagnosticsReturn {
 export function useKscanDiagnostics(): UseKscanDiagnosticsReturn {
   const zmkApp = useContext(ZMKAppContext);
   const connection = zmkApp?.state.connection ?? null;
-  const subsystem = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER) ?? null;
+  const subsystemIndex = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER)?.index;
+  const service = useMemo(() => {
+    if (!connection || subsystemIndex === undefined) return null;
+    return new ZMKCustomSubsystem(connection, subsystemIndex);
+  }, [connection, subsystemIndex]);
+  const scopeRef = useRef({
+    service,
+    active: true,
+    topologyRequest: 0,
+    statsRequest: 0,
+  });
+  useEffect(() => {
+    const scope = scopeRef.current;
+    scope.service = service;
+    scope.active = true;
+    return () => {
+      scope.active = false;
+      scope.topologyRequest++;
+      scope.statsRequest++;
+    };
+  }, [service]);
 
   const [topology, setTopology] = useState<Topology | null>(null);
   const [stats, setStats] = useState<StatsByPosition | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const service = useMemo(() => {
-    if (!connection || !subsystem) return null;
-    return new ZMKCustomSubsystem(connection, subsystem.index);
-  }, [connection, subsystem]);
+  const [topologyLoading, setTopologyLoading] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [topologyError, setTopologyError] = useState<string | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
 
   const loadTopology = useCallback(async () => {
-    if (!service) return;
-    setIsLoading(true);
-    setError(null);
+    const scope = scopeRef.current;
+    if (!service || !scope.active || scope.service !== service) return;
+    const ticket = ++scope.topologyRequest;
+    const owns = () =>
+      scope.active &&
+      scope.service === service &&
+      scope.topologyRequest === ticket;
+    setTopologyLoading(true);
+    setTopologyError(null);
     try {
-      const t = await fetchTopology(service);
-      setTopology(t);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
+      const result = await fetchTopology(service);
+      if (owns()) setTopology(result);
+    } catch (failure) {
+      if (owns())
+        setTopologyError(
+          failure instanceof Error ? failure.message : "Unknown error"
+        );
     } finally {
-      setIsLoading(false);
+      if (owns()) setTopologyLoading(false);
     }
   }, [service]);
 
   const loadStats = useCallback(async () => {
-    if (!service) return new Map();
-    setError(null);
+    const scope = scopeRef.current;
+    if (!service || !scope.active || scope.service !== service)
+      throw new KscanDiagnosticsRpcError("Diagnostics connection unavailable");
+    const ticket = ++scope.statsRequest;
+    const owns = () =>
+      scope.active &&
+      scope.service === service &&
+      scope.statsRequest === ticket;
+    setStatsLoading(true);
+    setStatsError(null);
     try {
-      const s = await fetchStats(service);
-      setStats(s);
-      return s;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
-      return new Map();
+      const result = await fetchStats(service);
+      if (owns()) setStats(result);
+      return result;
+    } catch (failure) {
+      if (owns())
+        setStatsError(
+          failure instanceof Error ? failure.message : "Unknown error"
+        );
+      // A wizard must not treat a failed read as an empty, successful baseline.
+      throw failure;
+    } finally {
+      if (owns()) setStatsLoading(false);
     }
   }, [service]);
 
   const resetStats = useCallback(async () => {
-    if (!service) return;
-    setError(null);
+    const scope = scopeRef.current;
+    if (!service || !scope.active || scope.service !== service) return;
+    const ticket = ++scope.statsRequest;
+    const owns = () =>
+      scope.active &&
+      scope.service === service &&
+      scope.statsRequest === ticket;
+    setStatsLoading(true);
+    setStatsError(null);
     try {
-      await callRpc(service, { resetStats: {} });
+      const response = await callRpc(service, { resetStats: {} });
+      if (!owns()) return;
+      if (!response.ok)
+        throw new KscanDiagnosticsRpcError("Missing reset acknowledgement");
       await loadStats();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unknown error");
+    } catch (failure) {
+      if (owns())
+        setStatsError(
+          failure instanceof Error ? failure.message : "Unknown error"
+        );
+      throw failure;
+    } finally {
+      if (owns()) setStatsLoading(false);
     }
   }, [service, loadStats]);
 
   return {
-    available: subsystem !== null,
+    available: service !== null,
     topology,
     stats,
-    isLoading,
-    error,
+    isLoading: topologyLoading || statsLoading,
+    error: topologyError ?? statsError,
     loadTopology,
     loadStats,
     resetStats,

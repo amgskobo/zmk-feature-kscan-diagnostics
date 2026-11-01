@@ -70,9 +70,9 @@ export function StatsTable({
                 <th>Min press (ms)</th>
                 <th>Min repress gap (ms)</th>
                 <th>&lt;5ms</th>
-                <th>&lt;10ms</th>
-                <th>&lt;20ms</th>
-                <th>&lt;50ms</th>
+                <th>5–&lt;10ms</th>
+                <th>10–&lt;20ms</th>
+                <th>20–&lt;50ms</th>
                 <th>Last source</th>
               </tr>
             </thead>

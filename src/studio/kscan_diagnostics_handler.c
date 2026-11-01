@@ -29,11 +29,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static struct zmk_rpc_custom_subsystem_meta kscan_diagnostics_subsystem_meta = {
     ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://cormoran.github.io/zmk-feature-kscan-diagnostics/"),
-    // Secured by default: diagnostics require an unlocked device. Topology and
-    // aggregate counters are not highly sensitive, so exposing them while
-    // locked is opt-in via CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC_UNSECURED --
-    // useful in un-reliable environments where a broken keyboard may not be
-    // able to type the &studio_unlock combo (DESIGN.md SS2).
+// Secured by default: diagnostics require an unlocked device. Topology and
+// aggregate counters are not highly sensitive, so exposing them while
+// locked is opt-in via CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC_UNSECURED --
+// useful in un-reliable environments where a broken keyboard may not be
+// able to type the &studio_unlock combo (DESIGN.md SS2).
 #if IS_ENABLED(CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC_UNSECURED)
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
 #else

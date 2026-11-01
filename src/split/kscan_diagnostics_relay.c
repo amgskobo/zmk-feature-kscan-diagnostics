@@ -28,16 +28,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * Wire both relay carriers in both directions. The direction macros are
  * self-role-gating (the wrong-direction one expands empty per role), and the
  * HANDLE macros only fire when a relay frame with the matching identifier is
- * actually received -- a central never receives "KDq" and a peripheral never
- * receives "KDr", so listing all four here is safe on either role.
+ * actually received -- a central never receives "K2q" and a peripheral never
+ * receives "K2r", so listing all four here is safe on either role.
  *
- *   central  --KDq (query)-->  peripheral   (CENTRAL_TO_PERIPHERAL + HANDLE)
- *   peripheral --KDr (reply)--> central     (PERIPHERAL_TO_CENTRAL + HANDLE)
+ *   central  --K2q (query)-->  peripheral   (CENTRAL_TO_PERIPHERAL + HANDLE)
+ *   peripheral --K2r (reply)--> central     (PERIPHERAL_TO_CENTRAL + HANDLE)
  */
-ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(ksd_relay_query, KDq, source)
-ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(ksd_relay_reply, KDr, source)
-ZMK_RELAY_EVENT_HANDLE(ksd_relay_query, KDq, source)
-ZMK_RELAY_EVENT_HANDLE(ksd_relay_reply, KDr, source)
+ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(ksd_relay_query, K2q, source)
+ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(ksd_relay_reply, K2r, source)
+ZMK_RELAY_EVENT_HANDLE(ksd_relay_query, K2q, source)
+ZMK_RELAY_EVENT_HANDLE(ksd_relay_reply, K2r, source)
 
 /*
  * Dedicated work queue for the heavy half of the relay.
@@ -235,7 +235,7 @@ void ksd_relay_central_query(const cormoran_kscan_diagnostics_QueryPeripheral *r
 
     struct ksd_relay_query query = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-        .req_id = (uint8_t)req->req_id,
+        .req_id = req->req_id,
         .len = (uint8_t)req->payload.size,
     };
     memcpy(query.data, req->payload.bytes, query.len);

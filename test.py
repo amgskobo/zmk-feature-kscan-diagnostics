@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import platform
+import os
+import json
 import shutil
 import subprocess
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,13 +16,51 @@ THIS_DIR = Path(__file__).parent.resolve()
 TEST_BUILD_DIR_NAME = "tests-zmk-feature-kscan-diagnostics"
 
 
-def run_west(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["west", *args],
-        capture_output=True,
+def run_west(
+    args: list[str], evidence: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment.setdefault("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+    if args and args[0] == "zmk-build":
+        args = [*args, "--parallelism", "1"]
+    command = ["west", *args]
+    start = time.monotonic_ns()
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         cwd=THIS_DIR,
+        env=environment,
     )
+    result.stderr = ""
+    if evidence:
+        (evidence / (args[0] + ".log")).write_text(result.stdout)
+        (evidence / (args[0] + ".json")).write_text(
+            json.dumps(
+                dict(
+                    argv=command,
+                    exit=result.returncode,
+                    elapsed_ns=time.monotonic_ns() - start,
+                    compiler_jobs=environment["CMAKE_BUILD_PARALLEL_LEVEL"],
+                    stderr="merged into ordered stdout",
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
+    return result
+
+
+def fresh_output() -> Path:
+    requested = os.environ.get("OWNER_TEST_OUTPUT")
+    if not requested:
+        return Path(tempfile.mkdtemp(prefix="kscan-owner-"))
+    output = Path(requested).resolve()
+    if output.is_relative_to(THIS_DIR):
+        raise ValueError("Owner output must be outside the source checkout")
+    output.mkdir(parents=True, exist_ok=False)
+    return output
 
 
 @dataclass
@@ -40,8 +82,12 @@ class WestCommandsTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.WEST_TOPDIR = Path(run_west(["topdir"]).stdout.strip())
-        cls.BUILD_DIR = cls.WEST_TOPDIR / "build"
+        result = run_west(["topdir"])
+        if result.returncode or not result.stdout.strip():
+            raise RuntimeError(result.stdout + result.stderr)
+        cls.WEST_TOPDIR = Path(result.stdout.strip())
+        cls.BUILD_DIR = fresh_output()
+        print(f"Owner test output: {cls.BUILD_DIR}", flush=True)
 
     @unittest.skipUnless(
         platform.system() == "Linux", "zmk-test is only supported on Linux"
@@ -50,10 +96,14 @@ class WestCommandsTests(unittest.TestCase):
         test_build_dir = self.BUILD_DIR / TEST_BUILD_DIR_NAME
         shutil.rmtree(test_build_dir, ignore_errors=True)
 
-        result = run_west(["zmk-test", "tests", "-m", ".", "-d", str(test_build_dir)])
+        result = run_west(
+            ["zmk-test", "tests", "-m", ".", "-d", str(test_build_dir)],
+            self.BUILD_DIR,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS: test", result.stdout, result.stdout + result.stderr)
         self.assertIn("PASS: studio", result.stdout, result.stdout + result.stderr)
+        self.assertIn("PASS: mock-timing", result.stdout, result.stdout + result.stderr)
         self.assertNotIn("FAILED: ", result.stdout, result.stdout + result.stderr)
 
     def test_zmk_build(self):
@@ -167,6 +217,16 @@ class WestCommandsTests(unittest.TestCase):
                     ],
                     device=[],
                 ),
+                "kscan_diagnostics_board_hw_mock": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_KSCAN_DIAGNOSTICS=y",
+                        "CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC=y",
+                        "# CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC_TEST is not set",
+                        "# CONFIG_ZMK_KSCAN_DIAGNOSTICS_MOCK_TIMING_TEST is not set",
+                    ],
+                    device=["DT_COMPAT_HAS_OKAY_zmk_kscan_mock"],
+                ),
             }
         )
 
@@ -177,7 +237,10 @@ class WestCommandsTests(unittest.TestCase):
         for artifact in artifacts_and_expected_build_params.keys():
             shutil.rmtree(self.BUILD_DIR / artifact, ignore_errors=True)
 
-        result = run_west(["zmk-build", "tests/zmk-config", "-q"])
+        result = run_west(
+            ["zmk-build", "tests/zmk-config", "-q", "-d", str(self.BUILD_DIR)],
+            self.BUILD_DIR,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         for artifact, entries in artifacts_and_expected_build_params.items():

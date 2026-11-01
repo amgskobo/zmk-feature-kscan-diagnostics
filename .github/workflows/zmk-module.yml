@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - codex/kscan-diagnostics-review
     paths-ignore:
       - "**/*.md"
       - .github/workflows/copilot-setup-steps.yml
@@ -43,7 +44,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     container:
-      image: zmkfirmware/zmk-build-arm:stable
+      image: zmkfirmware/zmk-build-arm@sha256:edb1c953438c6f720ddb79c3762f3972013b7fbbaf4fff3592fc869983e7afc5
+      options: --cpus 3 --memory 6g
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      OWNER_TEST_OUTPUT: /tmp/kscan-owner-results
     name: Build
     steps:
       - name: Checkout
@@ -56,7 +61,7 @@ jobs:
         with:
           name: zmk-firmware
           path: |
-            build/*/zephyr/zmk.uf2
+            /tmp/kscan-owner-results/*/zephyr/zmk.uf2
 
   keepalive:
     if: github.event_name == 'schedule'

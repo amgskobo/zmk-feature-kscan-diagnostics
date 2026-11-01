@@ -126,7 +126,20 @@ const response = await service.callRPC(payload);
 → Device(s) → GpioPins → PositionMap, all chunk-assembled) plus `getStats`/
 `resetStats`. `useInputStream.ts` does the equivalent for the optional
 `zmk__input_stream` subsystem, feature-detecting it via `findSubsystem` so the
-app degrades gracefully when it's absent or locked.
+app degrades gracefully when it's absent, locked, or activation fails.
+Live view is enabled after an acknowledged request, and is stopped when the
+page or connection is retired. Held-key state is kept separately from the
+500-event display history.
+
+The wizard captures a statistics baseline in both live and polling modes.
+Its chatter thresholds sum the firmware's exclusive histogram bands and use
+session deltas. Failed or incomplete reads cannot become an empty baseline;
+counter resets initiated on this page retire the run immediately, including
+pending reads. A new test is available after the reset request finishes, even
+if it failed; the error stays visible. Saturation is checked at the baseline,
+while polling, and at the final snapshot for the positions under test. A
+saturated run requires a counter reset and a fresh baseline. Resets from
+another client are not always detectable; start a new test after any such reset.
 
 ## Testing
 

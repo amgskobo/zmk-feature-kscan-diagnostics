@@ -41,11 +41,12 @@ request/response pair before starting the next.
 
 ### Studio RPC
 
-- Default RPC buffers are tiny (RX 30 / TX 64 bytes). Custom settings needs
-  `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128`; large/chunked responses need
-  `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE` ≥ max encoded response + ~64 bytes of
-  framing margin. Put a `BUILD_ASSERT` next to the response definition so a
-  too-small buffer fails at compile time, not at runtime.
+- Default RPC buffers are small (RX 30 / TX 64 bytes). Custom settings needs
+  `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128`. The selected patched core streams
+  Studio responses with backpressure, so TX capacity affects throughput rather
+  than the maximum response size. Split relay payloads have a fixed bound:
+  preserve the size assertions in `include/cormoran/kscan_diagnostics/relay_events.h`
+  and the nanopb repeated-field limits.
 - Response payload data must live in static buffers: encoding runs after the
   handler returns, possibly multiple times. Stack-allocated data produces
   corrupted responses.
@@ -72,10 +73,12 @@ request/response pair before starting the next.
 
 ### Custom settings
 
-- `settings_load()` runs from `main()` after all SYS_INIT levels and does NOT
-  raise `zmk_custom_setting_changed`. Apply persisted values from your own
-  (async, workqueue-delayed) init path, and listen for
-  `zmk_custom_setting_changed` only for post-boot changes.
+- `settings_load()` runs after SYS_INIT and does not emit each setting's
+  change event. Apply persisted values from the selected registry's
+  `zmk_custom_settings_initialized` event, which follows loading. Listen for
+  setting changes for later updates. A failed persistent write can retain its
+  new memory value without a successful-save event; reconcile the effective
+  value while keeping the save error visible.
 - `ZMK_CUSTOM_SETTING_DEFINE` combined with `ZMK_CUSTOM_SETTING_RANGE_INT32`
   does not compile (nested compound literals in a static initializer). Define
   ranged settings with `STRUCT_SECTION_ITERABLE(zmk_custom_setting, ...)` and

@@ -1,5 +1,6 @@
 cormoran__kscan_diagnostics, Security: Secured
 cormoran_custom_settings, Security: Unsecured
+PASS: kscan_diagnostics_relay_request_id_roundtrip
 PASS: kscan_diagnostics_rpc_get_info
 PASS: kscan_diagnostics_rpc_get_layout
 PASS: kscan_diagnostics_rpc_get_device

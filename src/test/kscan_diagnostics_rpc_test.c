@@ -25,6 +25,7 @@
 #include <pb_encode.h>
 #include <zmk/studio/custom.h>
 #include <cormoran/kscan_diagnostics/kscan_diagnostics.pb.h>
+#include <cormoran/kscan_diagnostics/relay_events.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -435,8 +436,55 @@ static int test_rpc_unknown_index_errors(void) {
     return 0;
 }
 
+/* Exercise the actual relay carrier types and nanopb event format, without a
+ * split transport. IDs above 255 must survive both carriers and notification
+ * encoding; otherwise a client cannot correlate a reply to its request. */
+static int test_relay_request_id_roundtrip(void) {
+    const uint32_t ids[] = {0, 255, 256, 0x12345678, UINT32_MAX};
+    for (size_t i = 0; i < ARRAY_SIZE(ids); i++) {
+        cormoran_kscan_diagnostics_QueryPeripheral request =
+            cormoran_kscan_diagnostics_QueryPeripheral_init_zero;
+        request.req_id = ids[i];
+        struct ksd_relay_query sent = {.req_id = request.req_id};
+        uint8_t query_wire[sizeof(sent)];
+        memcpy(query_wire, &sent, sizeof(sent));
+        struct ksd_relay_query received;
+        memcpy(&received, query_wire, sizeof(received));
+
+        struct ksd_relay_reply answer = {.req_id = received.req_id};
+        uint8_t reply_wire[sizeof(answer)];
+        memcpy(reply_wire, &answer, sizeof(answer));
+        struct ksd_relay_reply reply;
+        memcpy(&reply, reply_wire, sizeof(reply));
+
+        cormoran_kscan_diagnostics_PeripheralEvent event =
+            cormoran_kscan_diagnostics_PeripheralEvent_init_zero;
+        event.req_id = reply.req_id;
+        uint8_t encoded[16];
+        pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
+        if (!pb_encode(&output, cormoran_kscan_diagnostics_PeripheralEvent_fields, &event)) {
+            return -EINVAL;
+        }
+        cormoran_kscan_diagnostics_PeripheralEvent decoded =
+            cormoran_kscan_diagnostics_PeripheralEvent_init_zero;
+        pb_istream_t input = pb_istream_from_buffer(encoded, output.bytes_written);
+        if (!pb_decode(&input, cormoran_kscan_diagnostics_PeripheralEvent_fields, &decoded) ||
+            decoded.req_id != ids[i]) {
+            LOG_ERR("relay request ID changed: expected %u, got %u", ids[i], decoded.req_id);
+            return -EINVAL;
+        }
+    }
+    LOG_INF("PASS: kscan_diagnostics_relay_request_id_roundtrip");
+    return 0;
+}
+
 static int kscan_diagnostics_rpc_test_init(void) {
-    int ret = test_rpc_get_info();
+    int ret = test_relay_request_id_roundtrip();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_rpc_get_info();
     if (ret < 0) {
         return ret;
     }

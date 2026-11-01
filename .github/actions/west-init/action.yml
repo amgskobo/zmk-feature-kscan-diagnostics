@@ -19,6 +19,7 @@ runs:
           ${{ runner.os }}-build-${{ env.cache_name }}-
     - name: Init
       run: |
+        python3 tools/verify_review_dependencies.py
         git config --global --add safe.directory ${{ github.workspace }}
         west init -l west --mf "${{ env.WEST_MANIFEST_FILE }}"
         west update --narrow

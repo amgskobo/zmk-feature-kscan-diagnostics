@@ -188,8 +188,9 @@ export function resolveDeviceForCell(
  * no separate row/col address space (the same physical lines serve both,
  * DESIGN.md §4), so its ROW-kind and COL-kind pages both index into the
  * shared `gpios` line list. Direct/demux have no "row" concept; the input
- * line is surfaced as `rowLine` so the UI still shows one wire per key, and
- * demux's decoded column uses its OUTPUT lines.
+ * line is surfaced as `rowLine` so the UI still shows one wire per key.
+ * Demux columns are binary addresses over several OUTPUT lines, not indices
+ * into that list; there is no single physical column GPIO to display.
  */
 export function resolveRowColLines(
   device: KscanDevice,
@@ -211,14 +212,13 @@ export function resolveRowColLines(
       };
     case KscanDriverType.DIRECT:
       return {
-        rowLine: device.gpioLinesByKind[GpioLineKind.INPUT]?.[localRow] ?? null,
+        rowLine: device.gpioLinesByKind[GpioLineKind.INPUT]?.[localCol] ?? null,
         colLine: null,
       };
     case KscanDriverType.DEMUX:
       return {
         rowLine: device.gpioLinesByKind[GpioLineKind.INPUT]?.[localRow] ?? null,
-        colLine:
-          device.gpioLinesByKind[GpioLineKind.OUTPUT]?.[localCol] ?? null,
+        colLine: null,
       };
     default:
       return { rowLine: null, colLine: null };

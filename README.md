@@ -2,7 +2,8 @@
 
 Maintenance fork of [cormoran/zmk-feature-kscan-diagnostics](https://github.com/cormoran/zmk-feature-kscan-diagnostics).
 The source baseline is `1432f7fe0cfe903cd7d3c9931ae6bd6f2e1f328e`.
-Firmware, protocol and existing test assertions are retained. Validation must
+Firmware and protocol interfaces remain compatible, and existing validation
+scenarios are retained. Validation must
 identify the selected source and dependencies; a fork or a successful build
 does not establish physical wiring, timing or transport acceptance.
 
@@ -77,20 +78,26 @@ Optional, but recommended if you can add it:
      projects:
        - name: zmk-feature-kscan-diagnostics
          remote: amgskobo
-         revision: 1432f7fe0cfe903cd7d3c9931ae6bd6f2e1f328e
+         revision: 9eaf49df49fcff1f35e8927b2e9b50afe1b05739
          import: true
        # Optional: live key-press visualization in the web UI (see above)
        - name: zmk-feature-input-stream
-         remote: cormoran
-         revision: main
+         remote: amgskobo
+         revision: cdb7388c62dadebe08c1d63e7b1a2a97ad87ce47
          import: true
        # Required: patched ZMK with custom Studio RPC support
        - name: zmk
          remote: cormoran
-         revision: main+custom-studio-protocol
+         revision: e5c9b6915b56801193e359dd9bad4a167ce0d1b8
          import:
            file: app/west.yml
    ```
+
+   The module revision above is the committed fork baseline. Maintenance
+   continues on `codex/kscan-diagnostics-review`; after explicitly reviewing
+   a newer commit, pin its full revision in your integrating manifest and lock.
+   The required Custom Settings dependency is imported from its pinned
+   `amgskobo` review fork.
 
 2. Enable flags in your `config/<shield>.conf`:
 
@@ -143,6 +150,11 @@ CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
 The central additionally needs `CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC=y`
 (from the base setup above) to forward peripheral replies to the web UI; the
 peripheral does not need `CONFIG_ZMK_STUDIO`.
+
+Build both halves from the same module revision. The maintenance version uses
+version 2 split relay carriers to preserve the RPC's full 32-bit request ID.
+It uses distinct relay identifiers, so an older half cannot decode these
+carriers; update both halves together. The Studio RPC messages are unchanged.
 
 > Status: the firmware and RPC for this are complete (a `QueryPeripheral`
 > request and `PeripheralEvent` notification on the diagnostics subsystem). The
@@ -202,6 +214,30 @@ keyboard over WebSerial.
 3. **Stats table.** A raw table of per-key press/release counts and timing,
    with a reset button and CSV export, if you want the numbers directly.
 
+Live view starts automatically when its subsystem is available. It is used
+only after the keyboard acknowledges activation. If activation fails or Studio
+is locked, coverage uses statistics polling; unlock and choose **Enable live
+view** to retry on the same connection. Leaving the page or replacing the
+connection sends a best-effort stop to the original stream.
+
+Each **Start test** reads a statistics baseline, including with live view.
+The final report reconciles press counts with the firmware's baseline delta,
+so switching from polling to live view cannot count the same press twice.
+If an initial topology or layout read fails, use **Reload diagnostics** after
+unlocking or recovering the connection. Reloading topology starts a new wizard
+run so its wiring and baseline cannot carry over from an older layout.
+Chatter reports count new repeats since that baseline. The raw table and CSV
+retain the keyboard's lifetime counters: their four fields represent exclusive
+bands (`<5`, `5–<10`, `10–<20`, `20–<50` ms), while the wizard sums all
+bands below the selected threshold. Saturated counters stop a test even if
+they reach their limit during coverage or the final read. Use **Reset counters**
+before starting again. Resetting from this page ends the current test and
+clears its coverage; wait for the operation to finish, then choose **Start test**
+for a fresh baseline. A failed reset still retires the old test and displays
+the error. A reset performed by another client cannot always be detected;
+start a new test after any such reset. Other failed reads keep the wizard in
+its current step so they can be retried.
+
 ### Reading the findings
 
 | Finding | What it means | What to check |
@@ -218,6 +254,12 @@ evidence that triggered it, so you can judge it yourself if the suggested fix
 doesn't pan out.
 
 ### Limitations (things this tool can't see)
+
+- **Demux columns use several address pins.** The per-key overlay shows the
+  input GPIO, without assigning one address pin to a decoded column. A decoded
+  address is not a single wire. Electrical findings use resolved physical GPIO
+  identity, so separate devices in a composite layout do not share a line merely
+  because their logical row or column numbers match.
 
 - **It only sees keys after debouncing.** The firmware only knows about a key
   press once its kscan driver's debounce filter has accepted it. Very brief
@@ -255,8 +297,8 @@ its own custom RPC subsystem, and — only in the web UI, so the fault rules
 can be iterated quickly — turns all of that into the findings described
 above. See [DESIGN.md](./DESIGN.md) for the full technical design, protocol
 definition, and the reasoning behind these choices, and
-[docs/validation.md](./docs/validation.md) for a real-hardware validation
-run.
+[docs/validation.md](./docs/validation.md) for the reproducible validation and
+hardware acceptance procedure.
 
 ## More Info
 
@@ -265,6 +307,12 @@ For more info on modules, you can read through through the [Zephyr modules page]
 ## Module Development Guide
 
 ### Setup for running test
+
+Run preparation and checks inside Docker using the image digest recorded in
+`.github/workflows/fork-review.yml`. Prepare dependencies with
+`python3 tools/verify_review_dependencies.py` before `west update`; it
+rejects moving support revisions and a Custom Settings review tip which differs
+from the pinned fork. Ordinary checks reuse those prepared inputs offline.
 
 #### Option0: Dev container (recommended)
 
@@ -308,6 +356,7 @@ Every commit need to pass pre-commit verification. The verification contains for
 ```
 pip install pre-commit
 pre-commit install
+pre-commit install-hooks
 
 # Run pre-commit manually
 pre-commit run --all-files
@@ -327,6 +376,13 @@ west zmk-test tests -m .
 # Run web tests
 cd web && npm test
 ```
+
+The owner entry builds all ten board profiles and executes all three native
+fixtures. It uses a fresh temporary output directory, printed at startup;
+`OWNER_TEST_OUTPUT` may select a fresh directory outside this checkout.
+It preserves earlier outputs and records each west command, exit and ordered
+output. Builds use one target at a time and default to two compiler jobs;
+keep `CMAKE_BUILD_PARALLEL_LEVEL` within the container's CPU budget.
 
 ### Sync changes from template
 

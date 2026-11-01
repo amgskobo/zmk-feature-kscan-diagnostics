@@ -109,7 +109,7 @@ describe("DiagnosisEngine", () => {
       expect(chatter?.evidence[0]).toContain("repress_lt50 = 3");
     });
 
-    it("uses medium confidence for a single low count and ignores buckets other than the selected one", () => {
+    it("includes shorter bands when choosing threshold confidence", () => {
       const statsAfter = makeStatsMap([
         { position: 2, repressLt50: 1, repressLt5: 9 },
       ]);
@@ -119,7 +119,8 @@ describe("DiagnosisEngine", () => {
       const chatter = findings.find(
         (f) => f.kind === "CHATTER" && f.positions.includes(2)
       );
-      expect(chatter?.confidence).toBe("medium");
+      expect(chatter?.confidence).toBe("high");
+      expect(chatter?.evidence[0]).toContain("repress_lt50 = 10");
     });
 
     it("does not fire when all repress counts are zero", () => {

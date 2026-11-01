@@ -36,7 +36,7 @@ repos:
     hooks:
       - id: jest
         name: jest tests
-        entry: bash -c 'cd web && npm test'
+        entry: bash -c 'cd web && npm run generate && npm test -- --runInBand'
         language: system
         files: ^web/
         pass_filenames: false

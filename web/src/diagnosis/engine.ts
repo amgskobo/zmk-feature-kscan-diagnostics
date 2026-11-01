@@ -14,6 +14,14 @@ function gpioLabel(line: CellWiring["rowLine"]): string {
   return `${line.port} pin ${line.pin}`;
 }
 
+function wireKey(line: CellWiring["rowLine"]): string | null {
+  return line ? JSON.stringify([line.port, line.pin]) : null;
+}
+
+function axisLine(cell: CellWiring, axis: "row" | "column") {
+  return axis === "row" ? cell.rowLine : cell.colLine;
+}
+
 function isDead(cell: CellWiring, input: DiagnosisInput): boolean {
   const cov = input.coverage.find((c) => c.position === cell.position);
   return cov?.status === "missed";
@@ -36,24 +44,30 @@ function ruleLineFault(input: DiagnosisInput): Finding[] {
   if (dead.length === 0) return findings;
 
   for (const axis of ["row", "column"] as const) {
-    const groups = new Map<number, CellWiring[]>();
+    const groups = new Map<string, CellWiring[]>();
     for (const cell of dead) {
-      const key = axis === "row" ? cell.row : cell.column;
+      const key = wireKey(axisLine(cell, axis));
+      if (key === null) continue;
       const list = groups.get(key) ?? [];
       list.push(cell);
       groups.set(key, list);
     }
-    for (const [axisValue, cells] of groups) {
+    for (const cells of groups.values()) {
       if (cells.length < 2) continue;
+      const axisValue = axis === "row" ? cells[0].row : cells[0].column;
       // The cross axis (column for ROW_FAULT, row for COLUMN_FAULT) must be
       // proven alive elsewhere for each dead cell, otherwise the fault could
       // just as well be on the cross axis (or untested board-wide).
       const crossProvenAlive = cells.every((cell) => {
-        const crossValue = axis === "row" ? cell.column : cell.row;
+        const crossAxis = axis === "row" ? "column" : "row";
+        const crossValue = wireKey(axisLine(cell, crossAxis));
+        const source = wireKey(axisLine(cell, axis));
+        if (crossValue === null) return false;
         return input.cells.some(
           (other) =>
-            (axis === "row" ? other.column : other.row) === crossValue &&
-            (axis === "row" ? other.row : other.column) !== axisValue &&
+            wireKey(axisLine(other, crossAxis)) === crossValue &&
+            wireKey(axisLine(other, axis)) !== null &&
+            wireKey(axisLine(other, axis)) !== source &&
             isAlive(other, input)
         );
       });
@@ -85,16 +99,21 @@ function ruleIsolatedKeyFault(input: DiagnosisInput): Finding[] {
   const findings: Finding[] = [];
   const dead = input.cells.filter((c) => isDead(c, input));
   for (const cell of dead) {
+    const row = wireKey(cell.rowLine);
+    const column = wireKey(cell.colLine);
+    if (row === null || column === null) continue;
     const rowAliveElsewhere = input.cells.some(
       (other) =>
-        other.row === cell.row &&
-        other.column !== cell.column &&
+        wireKey(other.rowLine) === row &&
+        wireKey(other.colLine) !== null &&
+        wireKey(other.colLine) !== column &&
         isAlive(other, input)
     );
     const colAliveElsewhere = input.cells.some(
       (other) =>
-        other.column === cell.column &&
-        other.row !== cell.row &&
+        wireKey(other.colLine) === column &&
+        wireKey(other.rowLine) !== null &&
+        wireKey(other.rowLine) !== row &&
         isAlive(other, input)
     );
     if (rowAliveElsewhere && colAliveElsewhere) {
@@ -115,24 +134,29 @@ function ruleIsolatedKeyFault(input: DiagnosisInput): Finding[] {
   return findings;
 }
 
-const CHATTER_FIELD: Record<
-  DiagnosisInput["chatterBucket"],
-  keyof import("../kscanDiagnosticsTypes").PositionStatsEntry
-> = {
-  lt5: "repressLt5",
-  lt10: "repressLt10",
-  lt20: "repressLt20",
-  lt50: "repressLt50",
-};
+const CHATTER_FIELDS = [
+  "repressLt5",
+  "repressLt10",
+  "repressLt20",
+  "repressLt50",
+] as const;
+const CHATTER_BANDS = { lt5: 1, lt10: 2, lt20: 3, lt50: 4 };
 
-/** CHATTER: repress_lt* count > 0 at the user-selected threshold bucket. */
+/** Firmware bands are exclusive; a threshold includes every smaller band. */
 function ruleChatter(input: DiagnosisInput): Finding[] {
   const findings: Finding[] = [];
-  const field = CHATTER_FIELD[input.chatterBucket];
+  const fields = CHATTER_FIELDS.slice(0, CHATTER_BANDS[input.chatterBucket]);
   for (const cell of input.cells) {
     const stats = input.statsAfter.get(cell.position);
     if (!stats) continue;
-    const count = stats[field] as number;
+    const before = input.statsBefore?.get(cell.position);
+    // A reset needs a fresh session baseline, never a negative or mixed delta.
+    if (before && CHATTER_FIELDS.some((field) => stats[field] < before[field]))
+      continue;
+    const count = fields.reduce(
+      (sum, field) => sum + stats[field] - (before?.[field] ?? 0),
+      0
+    );
     if (count > 0) {
       findings.push({
         kind: "CHATTER",
@@ -140,7 +164,9 @@ function ruleChatter(input: DiagnosisInput): Finding[] {
         positions: [cell.position],
         summary: `Position ${cell.position} re-pressed ${count} time(s) with gap < ${input.chatterBucket.slice(2)}ms`,
         action: `Replace switch or raise debounce-press-ms (currently unknown from this cell alone) at position ${cell.position}`,
-        evidence: [`repress_${input.chatterBucket} = ${count}`],
+        evidence: [
+          `repress_${input.chatterBucket} = ${count} (cumulative histogram bands${before ? ", session delta" : ""})`,
+        ],
       });
     }
   }
@@ -230,15 +256,18 @@ function ruleUnstableLine(input: DiagnosisInput): Finding[] {
   if (avgPressCount <= 0) return findings;
 
   for (const axis of ["row", "column"] as const) {
-    const groups = new Map<number, typeof withCoverage>();
+    const groups = new Map<string, typeof withCoverage>();
     for (const x of withCoverage) {
-      const key = axis === "row" ? x.cell.row : x.cell.column;
+      const key = wireKey(axisLine(x.cell, axis));
+      if (key === null) continue;
       const list = groups.get(key) ?? [];
       list.push(x);
       groups.set(key, list);
     }
-    for (const [axisValue, entries] of groups) {
+    for (const entries of groups.values()) {
       if (entries.length < 2) continue;
+      const axisValue =
+        axis === "row" ? entries[0].cell.row : entries[0].cell.column;
       // "Intermittent": every position on the line was seen at least once
       // (so it's not a hard ROW_FAULT/COLUMN_FAULT) but the press count is
       // well below the board average for every one of them.
