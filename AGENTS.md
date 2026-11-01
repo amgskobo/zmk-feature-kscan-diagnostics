@@ -64,8 +64,11 @@ Application modules use the fork URL and `codex/*-review` branch recorded in
 `origin` URL, named remote branch tip and full commit before selecting it.
 Continue on that review branch; do not substitute a default branch, another
 review branch, an upstream repository or a sibling checkout implicitly.
-Preserve unrelated work in its original checkout and use a separate worktree
-when branch selection would overwrite it. Missing remote refs must be reported;
+Use the module's existing checkout and normal Git branches. Do not create
+additional worktrees or sibling authoring copies unless explicitly requested.
+Before switching branches, preserve unrelated local changes and record their
+disposition. Build/test staging copies belong in container storage and are not
+authoring checkouts. Missing remote refs must be reported;
 never manufacture an `origin` ref or label a local branch as remotely available.
 Creating a remote review ref is within scope when the user requests that action;
 that does not authorize publishing unrelated working changes or opening a PR.
