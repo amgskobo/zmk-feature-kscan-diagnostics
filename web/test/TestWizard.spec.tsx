@@ -59,6 +59,14 @@ function makeStatsMap(
   return map;
 }
 
+function makeEvent(
+  position: number,
+  pressed: boolean,
+  receivedAt: number
+): DiagnosisKeyEvent {
+  return { position, pressed, receivedAt };
+}
+
 describe("TestWizard", () => {
   it("walks coverage -> retest -> chatter -> report using live events", async () => {
     const cells = makeCells(9);
@@ -109,6 +117,112 @@ describe("TestWizard", () => {
 
     fireEvent.click(screen.getByText("Generate report"));
     expect(screen.getByText(/Report/i)).toBeInTheDocument();
+  });
+
+  it("reports a mapped ghost only from an explicit requested-key window", async () => {
+    const cells = makeCells(9);
+    let liveEvents: DiagnosisKeyEvent[] = [];
+    const fetchStats = jest.fn().mockResolvedValue(makeStatsMap(9, () => 1));
+    const props = () => ({
+      cells,
+      fetchStats,
+      liveEvents,
+      liveAvailable: true,
+    });
+    const { rerender } = render(<TestWizard {...props()} />);
+    await act(async () => fireEvent.click(screen.getByText("Start test")));
+    fireEvent.click(screen.getByText(/Done pressing/));
+    await act(async () => fireEvent.click(screen.getByText(/Done retesting/)));
+    // A free coverage press log must not be relabeled as a requested ghost test.
+    liveEvents = [
+      makeEvent(0, true, 3),
+      makeEvent(3, true, 2),
+      makeEvent(1, true, 1),
+    ];
+    rerender(<TestWizard {...props()} />);
+    fireEvent.click(screen.getByText("Start ghost check"));
+    expect(screen.getByText(/Hold positions/).textContent).toContain(
+      "do not press position 0"
+    );
+    liveEvents = [
+      makeEvent(0, true, 13),
+      makeEvent(4, true, 12),
+      makeEvent(3, true, 11),
+      makeEvent(1, true, 10),
+      ...liveEvents,
+    ];
+    rerender(<TestWizard {...props()} />);
+    fireEvent.click(screen.getByText("Finish ghost check"));
+    fireEvent.click(screen.getByText("Generate report"));
+    expect(screen.getByText("GHOST")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Unrequested press at position 0/)
+    ).toBeInTheDocument();
+  });
+
+  it("does not diagnose free coverage events as ghosts when the optional check was skipped", async () => {
+    const cells = makeCells(9);
+    const fetchStats = jest.fn().mockResolvedValue(makeStatsMap(9, () => 1));
+    render(
+      <TestWizard
+        cells={cells}
+        fetchStats={fetchStats}
+        liveAvailable={true}
+        liveEvents={[
+          makeEvent(0, true, 3),
+          makeEvent(3, true, 2),
+          makeEvent(1, true, 1),
+        ]}
+      />
+    );
+    await act(async () => fireEvent.click(screen.getByText("Start test")));
+    fireEvent.click(screen.getByText(/Done pressing/));
+    await act(async () => fireEvent.click(screen.getByText(/Done retesting/)));
+    fireEvent.click(screen.getByText("Generate report"));
+    expect(screen.queryByText("GHOST")).not.toBeInTheDocument();
+  });
+
+  it("discards an interrupted ghost window without resuming when live view returns", async () => {
+    const cells = makeCells(9);
+    const fetchStats = jest.fn().mockResolvedValue(makeStatsMap(9, () => 1));
+    let liveAvailable = true;
+    let liveEvents: DiagnosisKeyEvent[] = [];
+    const view = () => (
+      <TestWizard
+        cells={cells}
+        fetchStats={fetchStats}
+        liveEvents={liveEvents}
+        liveAvailable={liveAvailable}
+      />
+    );
+    const { rerender } = render(view());
+    await act(async () => fireEvent.click(screen.getByText("Start test")));
+    fireEvent.click(screen.getByText(/Done pressing/));
+    await act(async () => fireEvent.click(screen.getByText(/Done retesting/)));
+    fireEvent.click(screen.getByText("Start ghost check"));
+    liveEvents = [
+      makeEvent(0, true, 13),
+      makeEvent(4, true, 12),
+      makeEvent(3, true, 11),
+      makeEvent(1, true, 10),
+    ];
+    rerender(view());
+    expect(screen.getByText("Generate report")).toBeDisabled();
+
+    liveAvailable = false;
+    rerender(view());
+    expect(screen.getByText(/Live view stopped/)).toBeInTheDocument();
+    expect(screen.getByText("Start ghost check")).toBeDisabled();
+    expect(screen.queryByText("Finish ghost check")).not.toBeInTheDocument();
+    expect(screen.getByText("Generate report")).toBeEnabled();
+
+    liveAvailable = true;
+    rerender(view());
+    expect(screen.getByText("Start ghost check")).toBeEnabled();
+    expect(screen.queryByText("Finish ghost check")).not.toBeInTheDocument();
+    expect(screen.getByText(/Live view stopped/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Generate report"));
+    expect(screen.queryByText("GHOST")).not.toBeInTheDocument();
   });
 
   it("falls back to stats-diff polling when live events are unavailable", async () => {

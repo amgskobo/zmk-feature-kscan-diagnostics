@@ -130,6 +130,27 @@ app degrades gracefully when it's absent, locked, or activation fails.
 Live view is enabled after an acknowledged request, and is stopped when the
 page or connection is retired. Held-key state is kept separately from the
 500-event display history.
+Core lock notifications retire activation and diagnostics request tickets,
+clear live/held state and end the wizard run. Unlocking does not resume it;
+enable live view and start a new test explicitly. In-flight reads cannot supply
+a new baseline/final snapshot after retirement. The module's UNSECURED opt-in
+still permits manual diagnostics reads while locked, subject to firmware policy.
+
+The vendored input-stream protocol records its baseline commit and additive
+lease fields. Newer firmware returns a nonzero `stream_epoch` and lease length;
+the viewer sends `renew_only=true` with that same epoch every two seconds.
+Rejected/missing renewals turn live view off without a fresh enable. Older
+firmware replies remain accepted but have no lease guarantee; older viewers
+must implement renewal when used with lease-aware firmware or expire after one
+lease (15 seconds by default). Notification payloads still lack sequence,
+session epoch and held-key snapshot, so complete loss recovery is not promised.
+
+The optional Ghost check in the chatter step uses a mapped matrix rectangle.
+Release all keys, start the recording, hold only the three requested positions
+and leave its target untouched, then finish. Only this window and requested
+subset are supplied to the Ghost heuristic. Free coverage events cannot be
+classified as unrequested presses, and polling alone cannot establish the
+simultaneous held pattern. Findings remain candidates for controlled retesting.
 
 The wizard captures a statistics baseline in both live and polling modes.
 Its chatter thresholds sum the firmware's exclusive histogram bands and use

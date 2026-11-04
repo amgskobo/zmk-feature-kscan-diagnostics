@@ -128,7 +128,8 @@ Optional, but recommended if you can add it:
 | `CONFIG_ZMK_KSCAN_DIAGNOSTICS` | bool | `n` | Master switch. Enables kscan topology collection and per-key statistics. |
 | `CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC` | bool | `y` (once `ZMK_STUDIO` is enabled) | Exposes the diagnostics data over the custom Studio RPC subsystem so the web UI can read it. Only depends on `ZMK_STUDIO`, not on which kscan driver you use. |
 | `CONFIG_ZMK_KSCAN_DIAGNOSTICS_MAX_POSITIONS` | int | `128` | How many keymap positions get a statistics slot (~28 bytes RAM each). Raise it only if your layout has more than 128 positions; lower it to save RAM on very small MCUs. |
-| `CONFIG_ZMK_KSCAN_DIAGNOSTICS_SPLIT` | bool | `y` (on a split build) | On a split keyboard, lets the central relay diagnostics queries to the peripheral half/halves and deliver their replies to the web UI (see below). Requires `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256` on **both** halves. |
+| `CONFIG_ZMK_KSCAN_DIAGNOSTICS_SPLIT` | bool | `y` (on a split build) | On a split keyboard, lets the central relay diagnostics queries to the peripheral half/halves and deliver their replies to the web UI (see below). Set `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240` on **both** halves. |
+| `CONFIG_ZMK_KSCAN_DIAGNOSTICS_RELAY_TIMEOUT_MS` | int | `5000` | Lifetime of an outstanding peripheral reply, 1000–60000 ms. Four broadcast queries may be pending; each peripheral can answer each once. |
 
 ### Split keyboards
 
@@ -144,17 +145,34 @@ CONFIG_ZMK_KSCAN_DIAGNOSTICS_SPLIT=y
 # Required on BOTH halves: a peripheral reply carries a full topology page, which
 # is larger than ZMK's default relay payload. (The module sets this as a Kconfig
 # default, but that can lose Kconfig parse-order, so set it explicitly.)
-CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240
 ```
 
 The central additionally needs `CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC=y`
 (from the base setup above) to forward peripheral replies to the web UI; the
 peripheral does not need `CONFIG_ZMK_STUDIO`.
 
+The packed query and reply carriers are 38 and 198 bytes. Capacity 240 fits
+both and the selected core's one-byte wired-split envelope; 256 exceeds that
+envelope. A diagnostics peripheral without physical-layout nodes can use the
+chosen matrix-transform/kscan fallback, or a scan-only synthesized grid.
+Position maps always describe the full transform grid. Device wiring offsets
+place the local scan within that grid, including a right half with a nonzero
+transform origin; remote-half cells remain mapped without local wiring.
+
 Build both halves from the same module revision. The maintenance version uses
 version 2 split relay carriers to preserve the RPC's full 32-bit request ID.
 It uses distinct relay identifiers, so an older half cannot decode these
 carriers; update both halves together. The Studio RPC messages are unchanged.
+The central uses a fresh internal ticket and restores the client's complete
+32-bit request ID in `PeripheralEvent`. Lock/output changes revoke outstanding
+tickets and queued replies. Expired, unsolicited and duplicate peer replies
+are discarded. Payload authorization is checked again at the first encoder
+pass after a transport wait. A frame committed at sizing can finish; the
+module cannot cancel a core TX call already in progress. The explicit
+UNSECURED opt-in still permits newly submitted locked queries. The core does
+not expose a Serial-client close event here, so a reply can remain eligible
+until its deadline if the connection closes without a lock/output change.
 
 > Status: the firmware and RPC for this are complete (a `QueryPeripheral`
 > request and `PeripheralEvent` notification on the diagnostics subsystem). The
@@ -208,6 +226,10 @@ keyboard over WebSerial.
    - **Chatter check** — the wizard looks at how quickly each key was
      released and pressed again. A slider lets you pick how strict to be
      (keys that double-fire within 5/10/20/50 ms).
+     With live view and a mapped matrix rectangle, an optional **Ghost check**
+     asks you to release all keys, hold three specified positions and leave
+     one target untouched. Start/finish that check to capture its own event
+     window; choose another target to repeat it before generating the report.
    - **Report** — a plain-language list of findings, each with a suggested
      fix (see below).
 
@@ -219,6 +241,12 @@ only after the keyboard acknowledges activation. If activation fails or Studio
 is locked, coverage uses statistics polling; unlock and choose **Enable live
 view** to retry on the same connection. Leaving the page or replacing the
 connection sends a best-effort stop to the original stream.
+Core lock notifications clear live/held state, retire pending reads and end
+the current wizard run. Unlocking does not resume live view or the old run;
+start a fresh test and enable live view explicitly. A newer input-stream
+firmware may return a 15-second lease and nonzero epoch; this viewer renews
+that epoch every two seconds. Expired/stale updates cannot start a stream.
+Older input-stream firmware remains usable but provides no lease guarantee.
 
 Each **Start test** reads a statistics baseline, including with live view.
 The final report reconciles press counts with the firmware's baseline delta,
@@ -245,7 +273,7 @@ its current step so they can be retried.
 | **Row fault** / **Column fault** | Two or more dead keys share the same row (or column) wire, and the other wire each of those keys needs has already been proven to work. | The single row/column wire is almost certainly the problem. The finding names the exact GPIO port and pin — check that wire's continuity, its solder joint at the controller, and any connector/diode along that line. |
 | **Key fault** | One key is dead, but its row and its column have both been proven to work through other keys. | The fault is local to this one switch: reflow the solder joints under it, check the diode if it's a matrix board, or swap the switch. |
 | **Chatter** | A key fires press/release/press again faster than a real human keystroke (faster than your chosen threshold). | Usually a worn or low-quality switch — try cleaning or replacing it. If it's borderline, you can also raise the firmware's debounce time (the finding shows the board's current debounce setting in milliseconds) as a software workaround. |
-| **Ghost** | An unexpected key appeared to be pressed while you were holding down other keys that form a rectangle with it on the matrix — the classic "ghosting" caused by current flowing back through unwanted diodes. | Check the diode at the reported key position (missing, backwards, or shorted diode). This only applies to matrix keyboards. |
+| **Ghost** | During the optional Ghost check, an unrequested mapped matrix key appeared while other rectangle corners were held. This is a ghost-pattern candidate, not electrical proof. | Check the diode at the reported key position (missing, backwards, or shorted diode). Repeat the controlled check. This needs live view and applies to matrix keyboards. |
 | **Unstable line** | A row or column wasn't consistently dead, but its keys passed and failed inconsistently across repeated tests. | The wire itself is probably making intermittent contact rather than being fully broken. Gently wiggle/flex the wire and its connector while watching the keyboard view — if keys flicker between OK and dead, you've found the loose spot. |
 | **Software suspect** | The keyboard reports the key press correctly (no wiring/chatter finding), but you told the wizard the character/behavior is still wrong. | This isn't a hardware problem — check your keymap or behavior configuration instead. |
 
@@ -282,7 +310,8 @@ doesn't pan out.
   invisible.** If your matrix has more physical row/column intersections than
   keys in your layout, a phantom press on one of those unused intersections
   can't be reported — there's no key there for the wizard to color. Phantom
-  presses on real, mapped keys (the usual case) are detected normally.
+  presses on mapped keys can be reported as candidates during an explicit
+  live Ghost check. Skipping that check does not establish absence of ghosting.
 
 ## How it works
 

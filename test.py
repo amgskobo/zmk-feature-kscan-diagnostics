@@ -199,7 +199,7 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_KSCAN_DIAGNOSTICS_SPLIT=y",
                         "CONFIG_ZMK_SPLIT_ROLE_CENTRAL=y",
                         "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
-                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240",
                         "CONFIG_NANOPB=y",
                     ],
                     device=[],
@@ -211,7 +211,7 @@ class WestCommandsTests(unittest.TestCase):
                         "# CONFIG_ZMK_STUDIO is not set",
                         "# CONFIG_ZMK_SPLIT_ROLE_CENTRAL is not set",
                         "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
-                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240",
                         "CONFIG_NANOPB=y",
                         NotFound("CONFIG_ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC"),
                     ],
@@ -229,6 +229,22 @@ class WestCommandsTests(unittest.TestCase):
                 ),
             }
         )
+
+    @unittest.skipUnless(
+        platform.system() == "Linux", "kernel boundaries require Linux"
+    )
+    def test_review_boundaries(self):
+        result = subprocess.run(
+            ["bash", "tests/review/run.sh"],
+            cwd=THIS_DIR,
+            env={**os.environ, "KSCAN_REVIEW_OUTPUT": str(self.BUILD_DIR / "review")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        (self.BUILD_DIR / "review-boundaries.log").write_text(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Completed kscan review variants=10 repeats=3", result.stdout)
 
     def _test_zmk_build(
         self, artifacts_and_expected_build_params: dict[str, ConfigAndDeviceTree]

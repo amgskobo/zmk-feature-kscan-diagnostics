@@ -112,7 +112,9 @@ const struct ksd_layout *ksd_topology_get_layout(size_t index);
 size_t ksd_topology_selected_layout(void);
 
 /**
- * Compute the keymap position for (row, column) in the given layout.
+ * Compute the keymap position for a GLOBAL transform (row, column) in the
+ * given layout. Local scan dimensions and origin do not restrict this map;
+ * device wiring offsets identify which cells have locally known wiring.
  *
  * @retval >=0 the mapped position.
  * @retval -1 if the cell is unmapped or the layout index is out of range.

@@ -2,6 +2,7 @@ import type { ContextType } from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { call_rpc, MetaError } from "@zmkfirmware/zmk-studio-ts-client";
 import { ErrorConditions } from "@zmkfirmware/zmk-studio-ts-client/meta";
+import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import { ZMKAppContext } from "@cormoran/zmk-studio-react-hook";
 import { DiagnosticsSections } from "../src/App";
 import {
@@ -44,6 +45,8 @@ interface Model {
   app: Application;
   requests: { subsystemIndex: number; payload: Uint8Array }[];
   callbacks: Map<number, Callback>;
+  coreCallbacks: Set<(notification: { lockStateChanged: LockState }) => void>;
+  leaseEpoch?: number;
   streamMode: "ok" | "locked" | "error" | "empty" | "missing";
   streamPending?: Promise<Uint8Array>;
   statsMode: "ok" | "error" | "incomplete";
@@ -64,6 +67,7 @@ function model(streamPresent = true): Model {
     app: null as unknown as Application,
     requests: [],
     callbacks: new Map(),
+    coreCallbacks: new Set(),
     streamMode: "ok",
     statsMode: "ok",
     stats: new Map(
@@ -84,15 +88,22 @@ function model(streamPresent = true): Model {
           ? stream
           : undefined,
     onNotification: ({
+      type,
       subsystemIndex,
       callback,
     }: {
-      subsystemIndex: number;
-      callback: Callback;
+      type: string;
+      subsystemIndex?: number;
+      callback: Callback &
+        ((notification: { lockStateChanged: LockState }) => void);
     }) => {
-      result.callbacks.set(subsystemIndex, callback);
+      if (type === "core") {
+        result.coreCallbacks.add(callback);
+        return () => result.coreCallbacks.delete(callback);
+      }
+      result.callbacks.set(subsystemIndex!, callback);
       return () => {
-        result.callbacks.delete(subsystemIndex);
+        result.callbacks.delete(subsystemIndex!);
       };
     },
   } as unknown as Application;
@@ -143,6 +154,15 @@ async function rpc(connection: unknown, envelope: Envelope) {
       else if (current.streamMode === "empty") payload = undefined;
       else if (current.streamMode === "missing")
         payload = StreamResponse.encode(StreamResponse.create({})).finish();
+      else if (current.leaseEpoch)
+        payload = StreamResponse.encode(
+          StreamResponse.create({
+            ok: {
+              streamEpoch: current.leaseEpoch,
+              leaseMs: 15000,
+            },
+          })
+        ).finish();
     }
     return { custom: { call: { payload } } };
   }
@@ -261,6 +281,17 @@ function streamRequests(current: Model) {
   return current.requests
     .filter((r) => r.subsystemIndex === 1)
     .map((r) => StreamRequest.decode(r.payload));
+}
+async function lock(current: Model, locked: boolean) {
+  await act(async () => {
+    for (const callback of current.coreCallbacks)
+      callback({
+        lockStateChanged: locked
+          ? LockState.ZMK_STUDIO_CORE_LOCK_STATE_LOCKED
+          : LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+      });
+    await flush();
+  });
 }
 
 beforeEach(() => {
@@ -578,4 +609,126 @@ it("retires the old test even when a counter reset fails", async () => {
   );
   await start();
   expect(screen.getByText(/0 \/ 2 seen/)).toBeInTheDocument();
+});
+
+it("retires live state and the wizard on core lock, without resuming on unlock", async () => {
+  const current = model();
+  render(view(current));
+  await ready();
+  await start();
+  await key(current, 0, true);
+  await lock(current, true);
+  expect(screen.getByTestId("keycap-0")).not.toHaveAttribute(
+    "data-state",
+    "pressed"
+  );
+  expect(screen.getByText("Start test")).toBeInTheDocument();
+  expect(screen.getByText("Enable live view")).toBeInTheDocument();
+  await lock(current, false);
+  expect(
+    streamRequests(current).filter((request) => request.enableStream)
+  ).toHaveLength(1);
+  await act(async () => {
+    fireEvent.click(screen.getByText("Enable live view"));
+    await flush();
+  });
+  expect(
+    streamRequests(current).filter((request) => request.enableStream)
+  ).toHaveLength(2);
+  expect(screen.queryByText("Enable live view")).not.toBeInTheDocument();
+});
+
+it("rejects an activation acknowledgement arriving after lock and unlock", async () => {
+  const current = model();
+  let complete!: (bytes: Uint8Array) => void;
+  current.streamPending = new Promise((resolve) => {
+    complete = resolve;
+  });
+  render(view(current));
+  await ready();
+  await lock(current, true);
+  await lock(current, false);
+  await act(async () => {
+    complete(acknowledgement());
+    await flush();
+  });
+  expect(screen.getByText("Enable live view")).toBeInTheDocument();
+  await key(current, 0, true);
+  expect(screen.getByTestId("keycap-0")).not.toHaveAttribute(
+    "data-state",
+    "pressed"
+  );
+});
+
+it.each(["baseline", "final"])(
+  "rejects a pending %s statistics result after a core lock",
+  async (stage) => {
+    const current = model();
+    render(view(current));
+    await ready();
+    if (stage === "final") {
+      await start();
+      fireEvent.click(screen.getByText(/Done pressing/));
+    }
+    let complete!: (stats: StatsByPosition) => void;
+    current.statsPending = new Promise((resolve) => {
+      complete = resolve;
+    });
+    if (stage === "baseline") await start();
+    else
+      await act(async () => {
+        fireEvent.click(screen.getByText(/Done retesting/));
+        await flush();
+      });
+    await lock(current, true);
+    await lock(current, false);
+    await act(async () => {
+      complete(
+        new Map(
+          [...current.stats].map(([position, stats]) => [
+            position,
+            { ...stats, presses: 123 },
+          ])
+        )
+      );
+      await flush();
+    });
+    expect(screen.getByText("Start test")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Coverage pass|Chatter check/)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("123")).not.toBeInTheDocument();
+  }
+);
+
+it("renews the confirmed input-stream epoch and retires a late renewal on lock", async () => {
+  const current = model();
+  current.leaseEpoch = 41;
+  render(view(current));
+  await ready();
+  let complete!: (bytes: Uint8Array) => void;
+  current.streamPending = new Promise((resolve) => {
+    complete = resolve;
+  });
+  await act(async () => {
+    jest.advanceTimersByTime(2000);
+    await flush();
+  });
+  expect(streamRequests(current)[1].enableStream).toEqual({
+    renewOnly: true,
+    streamEpoch: 41,
+  });
+  await lock(current, true);
+  await lock(current, false);
+  await act(async () => {
+    complete(
+      StreamResponse.encode(
+        StreamResponse.create({ ok: { streamEpoch: 41, leaseMs: 15000 } })
+      ).finish()
+    );
+    jest.advanceTimersByTime(20000);
+    await flush();
+  });
+  expect(streamRequests(current)).toHaveLength(2);
+  expect(screen.getByText("Enable live view")).toBeInTheDocument();
 });

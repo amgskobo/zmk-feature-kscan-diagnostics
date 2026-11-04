@@ -18,6 +18,7 @@ import {
   ZMKAppContext,
   ZMKCustomSubsystem,
 } from "@cormoran/zmk-studio-react-hook";
+import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import {
   GpioLineKind,
   Request,
@@ -285,6 +286,8 @@ export interface UseKscanDiagnosticsReturn {
   stats: StatsByPosition | null;
   isLoading: boolean;
   error: string | null;
+  /** Changes when a lock retires in-flight reads and the wizard baseline. */
+  authorizationRevision: number;
   /** (Re-)fetch the full topology. */
   loadTopology: () => Promise<void>;
   /**
@@ -311,11 +314,13 @@ export function useKscanDiagnostics(): UseKscanDiagnosticsReturn {
     active: true,
     topologyRequest: 0,
     statsRequest: 0,
+    locked: false,
   });
   useEffect(() => {
     const scope = scopeRef.current;
     scope.service = service;
     scope.active = true;
+    scope.locked = false;
     return () => {
       scope.active = false;
       scope.topologyRequest++;
@@ -329,6 +334,41 @@ export function useKscanDiagnostics(): UseKscanDiagnosticsReturn {
   const [statsLoading, setStatsLoading] = useState(false);
   const [topologyError, setTopologyError] = useState<string | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [authorizationRevision, setAuthorizationRevision] = useState(0);
+
+  useEffect(() => {
+    if (!zmkApp || !service) return;
+    let active = true;
+    const unsubscribe = zmkApp.onNotification({
+      type: "core",
+      callback: (notification) => {
+        const scope = scopeRef.current;
+        if (
+          !active ||
+          !scope.active ||
+          scope.service !== service ||
+          notification.lockStateChanged === undefined
+        )
+          return;
+        scope.locked =
+          notification.lockStateChanged !==
+          LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED;
+        if (!scope.locked) return;
+        scope.topologyRequest++;
+        scope.statsRequest++;
+        setAuthorizationRevision((revision) => revision + 1);
+        setTopologyLoading(false);
+        setStatsLoading(false);
+        setStatsError(
+          "Studio locked. Unlock, then start a new test or reload diagnostics."
+        );
+      },
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [zmkApp, service]);
 
   const loadTopology = useCallback(async () => {
     const scope = scopeRef.current;
@@ -366,7 +406,9 @@ export function useKscanDiagnostics(): UseKscanDiagnosticsReturn {
     setStatsError(null);
     try {
       const result = await fetchStats(service);
-      if (owns()) setStats(result);
+      if (!owns())
+        throw new KscanDiagnosticsRpcError("Diagnostics read retired");
+      setStats(result);
       return result;
     } catch (failure) {
       if (owns())
@@ -413,6 +455,7 @@ export function useKscanDiagnostics(): UseKscanDiagnosticsReturn {
     stats,
     isLoading: topologyLoading || statsLoading,
     error: topologyError ?? statsError,
+    authorizationRevision,
     loadTopology,
     loadStats,
     resetStats,

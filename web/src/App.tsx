@@ -280,7 +280,7 @@ function DiagnosticsSession() {
             <p role="status">Resetting counters…</p>
           ) : (
             <TestWizard
-              key={`${objectIdentity(kscan.topology)}:${counterResetRevision}`}
+              key={`${objectIdentity(kscan.topology)}:${counterResetRevision}:${kscan.authorizationRevision}`}
               cells={cells}
               fetchStats={kscan.loadStats}
               liveEvents={inputStream.events}

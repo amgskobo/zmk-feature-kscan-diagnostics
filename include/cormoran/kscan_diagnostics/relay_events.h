@@ -39,7 +39,7 @@ BUILD_ASSERT(KSCAN_DIAGNOSTICS_RPC_ESTIMATED_MAX_RESPONSE_SIZE <= KSD_RELAY_REPL
 
 struct ksd_relay_query {
     uint8_t source;  /* ZMK_RELAY_EVENT_SOURCE_SELF on send; sender index+1 on receive */
-    uint32_t req_id; /* echoed back in the reply for client correlation */
+    uint32_t req_id; /* central-owned ticket; echoed unchanged by the peripheral */
     uint8_t len;     /* bytes of `data` in use */
     uint8_t data[KSD_RELAY_QUERY_DATA_MAX]; /* encoded inner Request */
 } __packed;
@@ -55,7 +55,8 @@ struct ksd_relay_reply {
  * The relay transport reassembles up to CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
  * bytes, and the whole reply struct is copied into that payload. ZMK's default
  * (128) is too small for a GpioPins page, so both split halves must build with
- * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256. The module sets that as a Kconfig
+ * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240. The packed reply is 198 bytes;
+ * 240 also fits the selected core's wired-split envelope. The module uses it as a Kconfig
  * default, but a `default` can lose Kconfig parse-order to ZMK's own default,
  * so set it explicitly in your config if this assert fires. (ZMK's own
  * __ZMK_RELAY_ASSERT_SIZE also guards this; this one just explains the fix.)
@@ -65,7 +66,7 @@ BUILD_ASSERT(sizeof(struct ksd_relay_query) <= CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA
              "kscan diagnostics query does not fit the split relay payload");
 BUILD_ASSERT(sizeof(struct ksd_relay_reply) <= CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
              "kscan diagnostics peripheral replies need "
-             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256 on both split halves");
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240 on both split halves");
 #endif
 
 ZMK_EVENT_DECLARE(ksd_relay_query);

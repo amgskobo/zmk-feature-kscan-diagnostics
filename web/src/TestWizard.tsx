@@ -16,6 +16,7 @@ import type {
   PositionCoverage,
 } from "./diagnosis/types";
 import type { StatsByPosition } from "./kscanDiagnosticsTypes";
+import { KscanDriverType } from "./proto/cormoran/kscan_diagnostics/kscan_diagnostics";
 
 export type WizardPhase = "idle" | "coverage" | "retest" | "chatter" | "report";
 
@@ -94,9 +95,29 @@ export function TestWizard({
   const [isBusy, setIsBusy] = useState(false);
   const [invalidCounters, setInvalidCounters] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [ghostTarget, setGhostTarget] = useState<number | null>(null);
+  const [previousLiveAvailable, setPreviousLiveAvailable] =
+    useState(liveAvailable);
+  const [ghostRecording, setGhostRecording] = useState(false);
+  const [ghostRun, setGhostRun] = useState<{
+    requested: Set<number>;
+    events: DiagnosisKeyEvent[];
+  } | null>(null);
+  const ghostBoundary = useRef<DiagnosisKeyEvent | null>(null);
   const lifetime = useRef({ active: true, revision: 0, busy: false });
   const eventsRef = useRef(liveEvents);
   const lastSeenEvent = useRef<DiagnosisKeyEvent | null>(null);
+
+  // Retire the observation window before a render can expose stale controls.
+  // Remember both transitions so restoring live view cannot resume recording.
+  if (previousLiveAvailable !== liveAvailable) {
+    setPreviousLiveAvailable(liveAvailable);
+    if (!liveAvailable && ghostRecording) {
+      setGhostRecording(false);
+      setGhostRun(null);
+      setError("Live view stopped. Enable it and repeat the ghost check.");
+    }
+  }
 
   useEffect(() => {
     const current = lifetime.current;
@@ -114,6 +135,49 @@ export function TestWizard({
     () => cells.map((c) => c.position),
     [cells]
   );
+  const ghostTargets = useMemo(() => {
+    const matrix = cells.filter(
+      (cell) => cell.deviceType === KscanDriverType.MATRIX
+    );
+    const same = (a: CellWiring["rowLine"], b: CellWiring["rowLine"]) =>
+      a !== null && b !== null && a.port === b.port && a.pin === b.pin;
+    return matrix.flatMap((target) => {
+      for (const a of matrix) {
+        if (a.column === target.column || !same(a.rowLine, target.rowLine))
+          continue;
+        for (const b of matrix) {
+          if (b.row === target.row || !same(b.colLine, target.colLine))
+            continue;
+          const diagonal = matrix.find(
+            (cell) =>
+              same(cell.rowLine, b.rowLine) && same(cell.colLine, a.colLine)
+          );
+          if (diagonal)
+            return [
+              {
+                target: target.position,
+                requested: [a.position, b.position, diagonal.position],
+              },
+            ];
+        }
+      }
+      return [];
+    });
+  }, [cells]);
+  const ghostSelection =
+    ghostTargets.find((item) => item.target === ghostTarget) ?? ghostTargets[0];
+
+  useEffect(() => {
+    if (!ghostRecording || !liveAvailable) return;
+    const boundary = ghostBoundary.current;
+    const index = boundary ? liveEvents.indexOf(boundary) : -1;
+    const added = index >= 0 ? liveEvents.slice(0, index) : liveEvents;
+    ghostBoundary.current = liveEvents[0] ?? null;
+    if (added.length)
+      setGhostRun((run) =>
+        run ? { ...run, events: [...added, ...run.events].slice(0, 500) } : null
+      );
+  }, [ghostRecording, liveAvailable, liveEvents]);
 
   const initCoverage = useCallback((): Map<number, PositionCoverage> => {
     const map = new Map<number, PositionCoverage>();
@@ -243,6 +307,8 @@ export function TestWizard({
       setStatsAfter(null);
       setCoverage(initCoverage());
       setFindings([]);
+      setGhostRun(null);
+      setGhostRecording(false);
       setInvalidCounters(false);
       setPhase("coverage");
     } catch (failure) {
@@ -319,9 +385,9 @@ export function TestWizard({
       coverage: [...coverage.values()],
       statsBefore: statsBaseline,
       statsAfter,
-      eventLog: liveEvents,
+      eventLog: ghostRun?.events ?? [],
       chatterBucket,
-      requestedPositions: new Set(positionsUnderTest),
+      requestedPositions: ghostRun?.requested,
     });
     setFindings(result);
     setPhase("report");
@@ -330,9 +396,8 @@ export function TestWizard({
     cells,
     coverage,
     statsBaseline,
-    liveEvents,
+    ghostRun,
     chatterBucket,
-    positionsUnderTest,
     invalidCounters,
   ]);
 
@@ -349,6 +414,8 @@ export function TestWizard({
     setFindings([]);
     setError(null);
     setInvalidCounters(false);
+    setGhostRecording(false);
+    setGhostRun(null);
   }, []);
 
   const seenCount = [...coverage.values()].filter(
@@ -420,6 +487,62 @@ export function TestWizard({
       {phase === "chatter" && (
         <div className="wizard-step">
           <h3>Chatter check</h3>
+          {ghostTargets.length > 0 && (
+            <div className="ghost-check">
+              <h4>Optional ghost check</h4>
+              <p>
+                Release all keys before starting. Then hold only the three
+                requested positions. Leave the target untouched.
+              </p>
+              <label>
+                Ghost target
+                <select
+                  value={ghostSelection?.target}
+                  disabled={ghostRecording}
+                  onChange={(event) =>
+                    setGhostTarget(Number(event.target.value))
+                  }
+                >
+                  {ghostTargets.map((item) => (
+                    <option key={item.target} value={item.target}>
+                      Position {item.target}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {ghostSelection && (
+                <p>
+                  Hold positions {ghostSelection.requested.join(", ")}; do not
+                  press position {ghostSelection.target}.
+                </p>
+              )}
+              {!liveAvailable && (
+                <p>
+                  Enable live view to record this check. Statistics alone cannot
+                  establish simultaneous held keys.
+                </p>
+              )}
+              <button
+                className="btn btn-secondary"
+                disabled={!liveAvailable || !ghostSelection}
+                onClick={() => {
+                  if (ghostRecording) {
+                    setGhostRecording(false);
+                    return;
+                  }
+                  ghostBoundary.current = liveEvents[0] ?? null;
+                  setGhostRun({
+                    requested: new Set(ghostSelection!.requested),
+                    events: [],
+                  });
+                  setGhostRecording(true);
+                  setError(null);
+                }}
+              >
+                {ghostRecording ? "Finish ghost check" : "Start ghost check"}
+              </button>
+            </div>
+          )}
           <label>
             Threshold bucket:{" "}
             <select
@@ -435,7 +558,11 @@ export function TestWizard({
             </select>
           </label>
           <div>
-            <button className="btn btn-primary" onClick={runDiagnosis}>
+            <button
+              className="btn btn-primary"
+              disabled={ghostRecording}
+              onClick={runDiagnosis}
+            >
               Generate report
             </button>
           </div>

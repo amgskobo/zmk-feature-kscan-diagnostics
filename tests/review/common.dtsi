@@ -1,0 +1,15 @@
+#include <dt-bindings/zmk/matrix_transform.h>
+/ {
+    chosen { zmk,kscan = &left_scan; };
+    left_scan: left_scan { compatible = "zmk,kscan-mock"; rows = <2>; columns = <2>; };
+    right_scan: right_scan { compatible = "zmk,kscan-mock"; rows = <2>; columns = <2>; };
+    left_transform: left_transform {
+        compatible = "zmk,matrix-transform"; rows = <4>; columns = <11>;
+        map = <RC(0,0) RC(0,1) RC(1,0) RC(1,1) RC(1,6) RC(1,7) RC(2,6) RC(2,7) RC(3,10)>;
+    };
+    right_transform: right_transform {
+        compatible = "zmk,matrix-transform"; rows = <4>; columns = <11>;
+        row-offset = <1>; col-offset = <6>;
+        map = <RC(0,0) RC(0,1) RC(1,0) RC(1,1) RC(1,6) RC(1,7) RC(2,6) RC(2,7) RC(3,10)>;
+    };
+};

@@ -47,6 +47,16 @@ config ZMK_KSCAN_DIAGNOSTICS_SPLIT
 
 if ZMK_KSCAN_DIAGNOSTICS_SPLIT
 
+config ZMK_KSCAN_DIAGNOSTICS_RELAY_TIMEOUT_MS
+    int "Peripheral query reply lifetime (ms)"
+    range 1000 60000
+    default 5000
+    help
+      Drop replies after this deadline or after Studio lock/output changes.
+      At most four outstanding broadcast queries are retained. Each peripheral
+      can answer a ticket once. Retrying allocates a new internal ticket while
+      the public 32-bit request ID is preserved in the notification.
+
 config ZMK_KSCAN_DIAGNOSTICS_RELAY_STACK_SIZE
     int "Stack size (bytes) for the kscan diagnostics relay work queue"
     default 4096
@@ -64,10 +74,11 @@ config ZMK_KSCAN_DIAGNOSTICS_RELAY_STACK_SIZE
 # GpioPins page -- see KSCAN_DIAGNOSTICS_RPC_ESTIMATED_MAX_RESPONSE_SIZE).
 # Raise the reassembled relay payload ceiling to fit it; the relay transport
 # chunks it across the split link automatically. If this default does not take
-# effect for your build, set CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
-# explicitly -- src/split/kscan_diagnostics_relay_events.h BUILD_ASSERTs it.
+# effect for your build, set CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240
+# explicitly. The packed reply is 198 bytes; 240 also fits the selected core's
+# one-byte wired-split envelope, whereas a 256-byte relay array cannot fit it.
 config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
-    default 256
+    default 240
 endif
 
 config ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC_TEST

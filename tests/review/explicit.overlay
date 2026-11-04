@@ -1,0 +1,7 @@
+#include "common.dtsi"
+/ {
+    left_layout { compatible = "zmk,physical-layout"; display-name = "Synthetic left";
+        transform = <&left_transform>; kscan = <&left_scan>; };
+    right_layout { compatible = "zmk,physical-layout"; display-name = "Synthetic right";
+        transform = <&right_transform>; kscan = <&right_scan>; };
+};

@@ -6,18 +6,17 @@
  *
  * Topology mirrors tests/test.dtsi's native_sim mock fixture (2x2 matrix
  * transform, 4-key physical layout) so most RPC responses are known ahead of
- * time from the already-passing native_sim test. Unlike the native_sim
+ * time from the native_sim fixture. Unlike the native_sim
  * fixture, this one has no `exit-after` -- the mock plays its event list
  * exactly once and then goes idle (kscan_mock_schedule_next_event simply
  * stops rescheduling once the list is exhausted, see
  * dependencies/zmk/app/module/drivers/kscan/kscan_mock.c); there is no "loop
  * forever" primitive in the DT event list itself, so a single pass is all a
- * real device gets per boot. Reset the board (`r`+`go` over J-Link) to replay
- * the script whenever a fresh RPC session needs fresh events.
+ * device gets per boot. Replaying the script needs a separately authorized
+ * reset with the same firmware and initial state.
  *
  * IMPORTANT -- zmk,kscan-mock's `events` array has a one-event-behind timing
- * quirk that is easy to get wrong (bit us during Phase E hardware validation,
- * see docs/validation.md): `kscan_mock_work_handler` fires `events[event_index]`
+ * rule: `kscan_mock_work_handler` fires `events[event_index]`
  * and then calls `kscan_mock_schedule_next_event(dev)` *before* incrementing
  * `event_index`, so that call re-reads the just-fired event's own delay field
  * to arm the timer for the *next* event. Net effect: `events[0]`'s delay is
@@ -25,31 +24,24 @@
  * -- for the delay before event 1), every other `events[i]`'s delay controls
  * the wait before event `i+1` (not event `i`), and the last event's own delay
  * field is never consumed (no event follows it). Concretely: if
- * T[i] = real firing time of events[i], then `T[0] = events[0].delay` and
+ * T[i] = nominal firing time of events[i], then `T[0] = events[0].delay` and
  * `T[1] = T[0] + events[0].delay` (so T[1] is forced to be exactly 2*T[0]),
  * then `T[i] = T[i-1] + events[i-1].delay` for i >= 2. tests/test.dtsi's
- * fixture happens to still pass its own assertions under this shifted timing
- * (its tolerant ranges absorb the shift), which is why this was not caught
- * before hardware testing.
+ * fixture uses tolerant assertion ranges; preserve this scheduling model when
+ * changing its inputs. Physical workqueue contention needs separate evidence.
  *
  * To get sane real firing times despite `events[0]` being double-consumed,
  * event 0/1 here are a throwaway "warm-up" press/release on position (1,1)
  * (= position 3, otherwise unused by any assertion) whose own timing nobody
  * cares about; the real test sequence starts at event index 2, where the
  * mapping from `events[i].delay` to "wait before event i+1" is a clean 1:1
- * relationship. Real (observed, hardware-confirmed 2026-07-05) timeline:
+ * relationship. Nominal timeline derived from the fixture's delay values:
  *   t=  500 P(1,1)  warm-up press   (position 3, ignored)
  *   t= 1000 R(1,1)  warm-up release (forced to 2x the warm-up press delay)
- *   t= 4000 P(0,0)                  (3s clear of the warm-up + any residual
- *                                    boot-time workqueue contention --
- *                                    BLE/USB/battery-voltage-divider init
- *                                    compete for the same workqueue mock
- *                                    events run on, which measured ~170-200ms
- *                                    of scheduling jitter on this rig when a
- *                                    chatter pair was scripted in the first
- *                                    500ms of boot -- native_sim has no such
- *                                    contention, hence its much smaller ~6ms
- *                                    jitter budget)
+ *   t= 4000 P(0,0)                  (3s clear of the warm-up; boot-time
+ *                                    BLE/USB/battery initialization can share
+ *                                    the workqueue, so actual timing still
+ *                                    needs matching board observations)
  *   t= 4200 R(0,0)  hold=200ms
  *   t= 4230 P(0,0)  repress gap=30ms -> chatter, "<50ms" bucket
  *   t= 4430 R(0,0)  hold=200ms

@@ -1,0 +1,2 @@
+#include "common.dtsi"
+/ { chosen { zmk,kscan = &right_scan; zmk,matrix-transform = &right_transform; }; };

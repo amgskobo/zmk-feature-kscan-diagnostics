@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "owner": "zmk-feature-kscan-diagnostics",
+  "supported_cores": ["dya"],
+  "unsupported_core_status": "NOT APPLICABLE",
+  "commands": ["python3 -m unittest -v", "cd web && npm run generate && npm test -- --runInBand"],
+  "coverage_map": "tests/README.md",
+  "preserved_assertions": "All three original native fixtures, snapshots, ten board profiles and Web/engine scenarios remain. Split capacity assertions change from the invalid documented 256 to 240 on both roles.",
+  "review_matrix": "Five real-kernel topology/relay roles/layouts, normal plus ASan/UBSan; build each of ten variants once and execute it three times with fresh working state.",
+  "negative_controls": "tests/review_negative_control.py; executable assertions required except wired-size, which intentionally requires the selected core's compile-time envelope rejection. inner-worker requires ASan.",
+  "gaps": ["Physical USB/BLE/wired split, GPIO/electrical ghosting, timing, power and interruption of blocked core TX require matching device evidence."]
+}

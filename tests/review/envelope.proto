@@ -1,0 +1,4 @@
+syntax = "proto3";
+package review;
+message Payload { bytes body = 1; }
+message Envelope { Payload payload = 1; }

@@ -12,6 +12,7 @@ import {
 } from "react";
 import { MetaError } from "@zmkfirmware/zmk-studio-ts-client";
 import { ErrorConditions } from "@zmkfirmware/zmk-studio-ts-client/meta";
+import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import type { CustomNotification } from "@zmkfirmware/zmk-studio-ts-client/custom";
 import {
   ZMKAppContext,
@@ -43,6 +44,8 @@ interface Session {
   request: number;
   wantsStream: boolean;
   accepting: boolean;
+  locked: boolean;
+  lease: { epoch: number; leaseMs: number } | null;
 }
 
 interface StreamState {
@@ -104,6 +107,8 @@ export function useInputStream(): UseInputStreamReturn {
     request: 0,
     wantsStream: false,
     accepting: false,
+    locked: false,
+    lease: null,
   });
   const [stored, setStored] = useState(() => initialState(service));
   const state = stored.owner === service ? stored : initialState(service);
@@ -123,8 +128,15 @@ export function useInputStream(): UseInputStreamReturn {
   const setStreaming = useCallback(
     async (enable: boolean) => {
       const session = lifetime.current;
-      if (!session.active || !service || session.service !== service) return;
+      if (
+        !session.active ||
+        !service ||
+        session.service !== service ||
+        (enable && session.locked)
+      )
+        return;
       const ticket = ++session.request;
+      session.lease = null;
       const owns = () =>
         session.active &&
         session.service === service &&
@@ -151,6 +163,13 @@ export function useInputStream(): UseInputStreamReturn {
           throw new Error(response.error.message || "Input stream failed");
         if (!response.ok)
           throw new Error("Missing input-stream acknowledgement");
+        if (enable && response.ok.leaseMs && !response.ok.streamEpoch)
+          throw new Error("Input-stream lease expired before acknowledgement");
+        if (enable && response.ok.streamEpoch && response.ok.leaseMs)
+          session.lease = {
+            epoch: response.ok.streamEpoch,
+            leaseMs: response.ok.leaseMs,
+          };
         if (!enable) session.wantsStream = false;
         update((s) => ({ ...s, enabled: enable, isLoading: false }));
       } catch (error) {
@@ -177,6 +196,106 @@ export function useInputStream(): UseInputStreamReturn {
   );
   const enable = useCallback(() => setStreaming(true), [setStreaming]);
   const disable = useCallback(() => setStreaming(false), [setStreaming]);
+
+  useEffect(() => {
+    if (!zmkApp || !service) return;
+    let active = true;
+    const unsubscribe = zmkApp.onNotification({
+      type: "core",
+      callback: (notification) => {
+        const session = lifetime.current;
+        if (
+          !active ||
+          !session.active ||
+          session.service !== service ||
+          notification.lockStateChanged === undefined
+        )
+          return;
+        session.locked =
+          notification.lockStateChanged !==
+          LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED;
+        if (!session.locked) {
+          update((s) => ({ ...s, locked: false }));
+          return;
+        }
+        session.request++;
+        session.accepting = false;
+        session.wantsStream = false;
+        session.lease = null;
+        update((s) => ({
+          ...s,
+          locked: true,
+          enabled: false,
+          isLoading: false,
+          error: null,
+          events: [],
+          pressedPositions: new Set(),
+          activeLayer: 0,
+        }));
+      },
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [zmkApp, service, update]);
+
+  useEffect(() => {
+    const session = lifetime.current;
+    const lease = session.lease;
+    if (!state.enabled || !service || !lease) return;
+    const ticket = session.request;
+    let retired = false;
+    let pending = false;
+    const owns = () =>
+      !retired &&
+      session.active &&
+      session.service === service &&
+      session.request === ticket &&
+      session.lease === lease &&
+      !session.locked;
+    const timer = window.setInterval(() => {
+      if (!owns() || pending) return;
+      pending = true;
+      const request = Request.create({
+        enableStream: { renewOnly: true, streamEpoch: lease.epoch },
+      });
+      void service
+        .callRPC(Request.encode(request).finish())
+        .then((bytes) => {
+          if (!owns()) return;
+          if (!bytes) throw new Error("Missing input-stream renewal response");
+          const response = Response.decode(bytes);
+          if (response.error) throw new Error(response.error.message);
+          if (response.ok?.streamEpoch !== lease.epoch)
+            throw new Error("Input-stream lease expired or changed");
+        })
+        .catch((error: unknown) => {
+          if (!owns()) return;
+          session.request++;
+          session.lease = null;
+          session.accepting = false;
+          session.wantsStream = false;
+          update((s) => ({
+            ...s,
+            enabled: false,
+            isLoading: false,
+            error:
+              error instanceof Error
+                ? error.message
+                : "Input stream renewal failed",
+            pressedPositions: new Set(),
+          }));
+        })
+        .finally(() => {
+          pending = false;
+        });
+    }, 2000);
+    return () => {
+      retired = true;
+      window.clearInterval(timer);
+    };
+  }, [state.enabled, service, update]);
 
   useEffect(() => {
     if (!zmkApp || subsystemIndex === undefined) return;
@@ -232,9 +351,12 @@ export function useInputStream(): UseInputStreamReturn {
     session.active = true;
     session.wantsStream = false;
     session.accepting = false;
+    session.locked = false;
+    session.lease = null;
     const stop = () => {
       if (session.service !== service) return;
       session.accepting = false;
+      session.lease = null;
       if (!session.wantsStream || !service) return;
       session.wantsStream = false;
       const payload = Request.encode(

@@ -50,8 +50,8 @@ export interface DiagnosisInput {
   /** Chatter threshold bucket the user picked in the UI. */
   chatterBucket: "lt5" | "lt10" | "lt20" | "lt50";
   /**
-   * Positions the wizard did NOT explicitly ask the user to press during the
-   * relevant window (used by the GHOST heuristic to spot phantom presses).
+   * Positions explicitly requested during the supplied ghost-check window.
+   * Presses outside this set are candidates for the GHOST heuristic.
    * When omitted, GHOST is skipped (needs an explicit "requested" set).
    */
   requestedPositions?: Set<number>;

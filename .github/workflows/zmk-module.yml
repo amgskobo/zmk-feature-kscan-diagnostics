@@ -57,6 +57,7 @@ jobs:
       - name: Test
         run: python3 -m unittest -v
       - name: Upload Build Artifacts
+        if: ${{ github.ref != 'refs/heads/codex/kscan-diagnostics-review' }}
         uses: actions/upload-artifact@v4
         with:
           name: zmk-firmware

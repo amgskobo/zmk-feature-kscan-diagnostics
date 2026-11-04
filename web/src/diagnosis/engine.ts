@@ -200,7 +200,7 @@ function ruleGhost(input: DiagnosisInput): Finding[] {
           const cellA = byPosition.get(a);
           if (!cellA) continue;
           for (const b of held) {
-            if (b === a) continue;
+            if (b <= a) continue; // Consider each held pair once.
             const cellB = byPosition.get(b);
             if (!cellB) continue;
             const sameRowAsGhost =

@@ -1,8 +1,10 @@
-// Vendored copy — DO NOT EDIT BY HAND.
+// Vendored protocol baseline with the additive lease/layer-state extension.
 //
 // Source: https://github.com/cormoran/zmk-feature-input-stream
 //         proto/zmk/input_stream/input_stream.proto
-// Pinned commit: 0430fc89db8b3d035fd9c645ce008f9280cbd2cb
+// Baseline commit: 0430fc89db8b3d035fd9c645ce008f9280cbd2cb
+// Extension: renew_only + uint32 stream_epoch/lease_ms and current-index
+// layer mask. Older peers ignore these additive fields; see web/README.md.
 //
 // Rationale (DESIGN.md SS7): this web app's `useInputStream` hook needs
 // ts-proto types for zmk-feature-input-stream's custom RPC subsystem, but
@@ -18,7 +20,10 @@ syntax = "proto3";
 
 package zmk.input_stream;
 
-message EnableStreamRequest {}
+message EnableStreamRequest {
+    bool renew_only = 1;
+    uint32 stream_epoch = 2;
+}
 
 message DisableStreamRequest {}
 
@@ -31,7 +36,11 @@ message Request {
 
 message ErrorResponse { string message = 1; }
 
-message OkResponse {}
+message OkResponse {
+    LayerChangeNotification layer_state = 1;
+    uint32 stream_epoch = 2;
+    uint32 lease_ms = 3;
+}
 
 message Response {
     oneof response_type {
@@ -51,7 +60,11 @@ message KeyEventNotification {
 }
 
 // Sent whenever the highest-active-layer index changes.
-message LayerChangeNotification { uint32 layer_index = 1; }
+message LayerChangeNotification {
+    uint32 layer_index = 1;
+    uint32 active_layer_mask = 2;
+    bool active_layer_mask_valid = 3;
+}
 
 message Notification {
     oneof notification_type {

@@ -20,6 +20,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zmk/physical_layouts.h>
+#include <zmk/matrix.h>
 
 /*
  * ---------------------------------------------------------------------------
@@ -518,9 +519,9 @@ static size_t ksd_topology_resolve(const struct device *dev, struct ksd_layout_d
  * ===========================================================================
  * Physical layouts: one entry per zmk,physical-layout DT node (or ZMK's
  * chosen-node synthesized layout -- see app/src/physical_layouts.c). We keep
- * our own rows/columns/kscan table (matched at runtime by device pointer
- * against zmk_physical_layouts_get_list(), since zmk_matrix_transform_t is
- * opaque) plus the resolved leaf-device list with offsets.
+ * our own rows/columns/kscan/map table plus the resolved leaf-device list.
+ * Public map coordinates use the full transform grid; resolved local device
+ * offsets include its origin once. The opaque core transform is not accessed.
  * ===========================================================================
  */
 struct ksd_layout_dt_entry {
@@ -528,9 +529,18 @@ struct ksd_layout_dt_entry {
     uint16_t rows;
     uint16_t columns;
     const struct device *kscan;
+    const uint32_t *map;
+    size_t map_count;
+    uint16_t row_offset;
+    uint16_t col_offset;
 };
 
-#if DT_HAS_COMPAT_STATUS_OKAY(zmk_physical_layout)
+#define KSD_TRANSFORM_FIELDS(n)                                                                    \
+    .rows = DT_PROP(n, rows), .columns = DT_PROP(n, columns),                                      \
+    .map = (const uint32_t[])DT_PROP(n, map), .map_count = DT_PROP_LEN(n, map),                    \
+    .row_offset = DT_PROP_OR(n, row_offset, 0), .col_offset = DT_PROP_OR(n, col_offset, 0)
+
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_physical_layout) && !DT_HAS_CHOSEN(zmk_matrix_transform)
 
 /* Mirrors physical_layouts.c: an explicit `kscan` phandle wins, otherwise the
  * `zmk,kscan` chosen node is used as a fallback (if present). */
@@ -542,8 +552,7 @@ struct ksd_layout_dt_entry {
 #define KSD_LAYOUT_ENTRY(n)                                                                        \
     {                                                                                              \
         .display_name = DT_PROP(n, display_name),                                                  \
-        .rows = DT_PROP(DT_PHANDLE(n, transform), rows),                                           \
-        .columns = DT_PROP(DT_PHANDLE(n, transform), columns),                                     \
+        KSD_TRANSFORM_FIELDS(DT_PHANDLE(n, transform)),                                            \
         .kscan = KSD_LAYOUT_KSCAN_DEV(n),                                                          \
     },
 
@@ -551,6 +560,23 @@ static const struct ksd_layout_dt_entry ksd_layout_dt_entries[] = {
     DT_FOREACH_STATUS_OKAY(zmk_physical_layout, KSD_LAYOUT_ENTRY)};
 #define KSD_LAYOUT_DT_ENTRY_COUNT DT_NUM_INST_STATUS_OKAY(zmk_physical_layout)
 
+#elif DT_HAS_CHOSEN(zmk_matrix_transform)
+static const struct ksd_layout_dt_entry ksd_layout_dt_entries[] = {{
+    .display_name = "Default",
+    KSD_TRANSFORM_FIELDS(DT_CHOSEN(zmk_matrix_transform)),
+#if DT_HAS_CHOSEN(zmk_kscan)
+    .kscan = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan)),
+#endif
+}};
+#define KSD_LAYOUT_DT_ENTRY_COUNT 1
+#elif DT_HAS_CHOSEN(zmk_kscan) && defined(ZMK_MATRIX_ROWS) && defined(ZMK_MATRIX_COLS)
+static const struct ksd_layout_dt_entry ksd_layout_dt_entries[] = {{
+    .display_name = "Default",
+    .rows = ZMK_MATRIX_ROWS,
+    .columns = ZMK_MATRIX_COLS,
+    .kscan = DEVICE_DT_GET(DT_CHOSEN(zmk_kscan)),
+}};
+#define KSD_LAYOUT_DT_ENTRY_COUNT 1
 #else
 static const struct ksd_layout_dt_entry ksd_layout_dt_entries[1];
 #define KSD_LAYOUT_DT_ENTRY_COUNT 0
@@ -575,6 +601,12 @@ static void ksd_layouts_init(void) {
         const struct ksd_layout_dt_entry *e = &ksd_layout_dt_entries[i];
         ksd_layout_device_counts[i] =
             ksd_topology_resolve(e->kscan, ksd_layout_devices[i], KSD_LAYOUT_MAX_DEVICES);
+        /* Wrapper offsets start in local scan coordinates. Publish them in
+         * the full transform grid, applying its origin exactly once. */
+        for (size_t d = 0; d < ksd_layout_device_counts[i]; d++) {
+            ksd_layout_devices[i][d].row_offset += e->row_offset;
+            ksd_layout_devices[i][d].col_offset += e->col_offset;
+        }
         ksd_layouts[i].display_name = e->display_name;
         ksd_layouts[i].rows = e->rows;
         ksd_layouts[i].columns = e->columns;
@@ -612,22 +644,6 @@ size_t ksd_topology_selected_layout(void) {
     return selected >= 0 ? (size_t)selected : 0;
 }
 
-/**
- * Find the zmk_matrix_transform_t for our DT-derived layout at @p index by
- * matching against ZMK's own runtime layout list. Both tables are built from
- * DT_FOREACH_STATUS_OKAY(zmk_physical_layout, ...) (or the same chosen-node
- * fallback when no zmk,physical-layout node exists), so index order matches;
- * we still verify against the list length as a safety net.
- */
-static zmk_matrix_transform_t ksd_transform_for_layout(size_t index) {
-    struct zmk_physical_layout const *const *layouts;
-    size_t count = zmk_physical_layouts_get_list(&layouts);
-    if (index >= count) {
-        return NULL;
-    }
-    return layouts[index]->matrix_transform;
-}
-
 int32_t ksd_topology_position_for_cell(size_t layout_index, uint32_t row, uint32_t column) {
     const struct ksd_layout *layout = ksd_topology_get_layout(layout_index);
     if (layout == NULL) {
@@ -636,10 +652,19 @@ int32_t ksd_topology_position_for_cell(size_t layout_index, uint32_t row, uint32
     if (row >= layout->rows || column >= layout->columns) {
         return -1;
     }
-    zmk_matrix_transform_t transform = ksd_transform_for_layout(layout_index);
-    if (transform == NULL) {
-        return -1;
+    const struct ksd_layout_dt_entry *entry = &ksd_layout_dt_entries[layout_index];
+    if (entry->map == NULL) {
+        return row * layout->columns + column;
     }
-    int32_t position = zmk_matrix_transform_row_column_to_position(transform, row, column);
-    return position < 0 ? -1 : position;
+    /* GetPositionMap enumerates GLOBAL transform cells. The core conversion
+     * API instead accepts LOCAL scan coordinates and adds row/column offsets.
+     * Read the public DT map directly so cells on either half, including those
+     * before the local origin, retain their original position and cannot alias
+     * the next row. No opaque core transform fields are accessed. */
+    for (size_t position = entry->map_count; position > 0; position--) {
+        uint32_t cell = entry->map[position - 1];
+        if ((cell >> 8) == row && (cell & 0xff) == column)
+            return position - 1;
+    }
+    return -1;
 }

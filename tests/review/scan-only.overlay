@@ -1,0 +1,4 @@
+/ {
+    chosen { zmk,kscan = &left_scan; };
+    left_scan: left_scan { compatible = "zmk,kscan-mock"; rows = <2>; columns = <2>; };
+};

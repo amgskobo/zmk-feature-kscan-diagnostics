@@ -57,7 +57,7 @@ updated when a phase deviates from the plan.
    the peripheral before transport.
 4. **Ghost keys on unmapped matrix cells are invisible** — `app/src/kscan.c`
    drops (row,col) pairs with no transform entry. Phantom presses on *mapped*
-   positions (the usual 4th-corner ghost) are visible and diagnosed.
+   positions can be recorded as candidates during an explicit live Ghost check.
 
 ## 2. Architecture overview
 
@@ -142,10 +142,15 @@ come from the same DT instances). Mirror ZMK's fallback: when no
 replicate that condition (see `app/src/physical_layouts.c`) or document that
 Studio (required anyway) needs physical layouts.
 
-**Position map** is computed at runtime via the public
-`zmk_matrix_transform_row_column_to_position(layout->matrix_transform, r, c)`
-iterating r×c of the selected layout (dims from our DT table). No private
-struct access.
+**Position map** enumerates the full transform grid from its public DT `map`
+property. The core row/column conversion accepts local scan coordinates and
+adds transform offsets, so passing global cells there would add the origin
+again and can alias the next row. The module instead matches global cells
+directly to DT map entries (unmapped stays zero on the wire), and adds the
+transform origin once to each resolved local device's wiring offset. It
+retains remote-half cells without claiming local wiring. Chosen transform and
+scan-only synthesized layouts mirror the selected core's fallback; no opaque
+core transform structure is accessed.
 
 **Zero-device rule** (template): when no kscan compat is okay, tables are empty
 and every accessor returns 0 devices/layout dims — RPC and native_sim tests
@@ -186,7 +191,7 @@ field gets a `.options` max_size.**
 
 Page sizes (`.options` max_count) bound the in-RAM Response struct and — once
 §11's relay is in play — keep each encoded Response within the relay's
-reassembly buffer (`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN`, 256). They are
+reassembly buffer (`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN`, 240). They are
 **not** bound by the Studio RPC TX buffer, which streams the encoding (§3).
 
 | Request | Response | Notes / encoded size |
@@ -194,7 +199,7 @@ reassembly buffer (`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN`, 256). They are
 | `GetInfo{}` | `Info{proto_version=1, layout_count, selected_layout, device_count, stats_enabled, max_positions, uptime_ms}` | ~30 B |
 | `GetLayout{layout_index}` | `Layout{layout_index, display_name(≤24), rows, columns, key_count, device_indices[≤4] (resolved leaf devices + their offsets: repeated LayoutDevice{leaf_index,row_offset,col_offset})}` | ~60 B |
 | `GetDevice{device_index}` | `Device{device_index, node_name(≤24), type, rows, columns, inputs, debounce_press_ms, debounce_release_ms, debounce_scan_period_ms, poll_period_ms, diode_row2col, toggle_mode}` | ~70 B |
-| `GetGpioPins{device_index, kind, offset}` | `GpioPins{total, offset, pins[≤4]{index, port(≤12), pin, active_low, dt_flags}}` | 4×~41 B ≈ 180 B — the largest response; sets `KSCAN_DIAGNOSTICS_RPC_ESTIMATED_MAX_RESPONSE_SIZE` and the relay reply-buffer bound (§11). 4 pins/page comfortably fits the 256 B relay payload. |
+| `GetGpioPins{device_index, kind, offset}` | `GpioPins{total, offset, pins[≤4]{index, port(≤12), pin, active_low, dt_flags}}` | 4×~41 B ≈ 180 B — the largest response; sets `KSCAN_DIAGNOSTICS_RPC_ESTIMATED_MAX_RESPONSE_SIZE` and the relay reply-buffer bound (§11). The 198-byte packed carrier fits the 240-byte relay payload. |
 | `GetPositionMap{layout_index, offset}` | `PositionMap{total, offset, cells[≤24]}` — row-major over rows×cols, value = position+1, 0 = unmapped | ≤24×5 B ≈ 130 B |
 | `GetStats{offset}` | `Stats{total, offset, entries[≤2] PositionStats{position, presses, releases, min_press_duration_ms, min_repress_gap_ms, repress_lt5/lt10/lt20/lt50, last_source}}` | 2×~62 B ≈ 140 B (each PositionStats has 10 uint32 fields) |
 | `QueryPeripheral{req_id, payload}` (§11) | `Ok{}` / `Error` | relay ack; peripheral reply arrives as a `PeripheralEvent` notification |
@@ -287,8 +292,8 @@ Rules must cite which evidence fired; confidence = simple tiers (high/med/low).
     once done (see `src/test/kscan_diagnostics_rpc_test.c`, same pattern as
     `zmk-feature-watchdog`'s `watchdog_test.c`). Also,
     `CONFIG_NATIVE_SIM_SLOWDOWN_TO_REAL_TIME=y` makes this a real
-    wall-clock-timed simulation (several ms of jitter per event hop observed
-    in practice), so timing assertions use tolerant ranges / the widest
+    wall-clock-timed simulation subject to scheduling jitter, so timing
+    assertions use tolerant ranges / the widest
     chatter bucket (`<50ms`) rather than exact milliseconds or a narrow
     bucket.
 - **Build tests** (`tests/zmk-config/build.yaml`, snippets under
@@ -304,19 +309,18 @@ Rules must cite which evidence fired; confidence = simple tiers (high/med/low).
 - **Web**: jest for DiagnosisEngine (table-driven fixtures per §7 rule) and
   hook/component tests via `createConnectedMockZMKApp({subsystems:
   ["cormoran__kscan_diagnostics", "zmk__input_stream"]})`.
-- **Hardware** (this PC's rig — see `skills/develop-zmk-module/references/hardware-rig.md`
-  in the workspace; XIAO nRF52840 + J-Link, **no physical switches attached**):
-  - flash the **mock-kscan** build (scripted events incl. chatter-like bursts):
-    validates the full chain Info/Device(type=MOCK)/PositionMap/Stats over real
-    USB RPC via `PYTHONPATH=tools tools/zmk-studio-rpc --transport pyusb ...`
-    from the workspace root.
-  - flash the direct-kscan tester build: validates GpioPins lists real
-    `xiao_d` pins. If a pin can be safely jumpered to GND in the rig, one real
-    keypress validates stats end-to-end (optional).
-  - Rig pitfalls that WILL bite: `CONFIG_FLASH_LOAD_OFFSET=0x0` overlay
-    required (stale bootloader region), never `erase`, RTT via `JLinkExe`
-    `savebin` (not RTTLogger), zero RTT control block before reset,
-    `-DCONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=0`.
+- **Hardware acceptance**: follow `docs/validation.md` with separately
+  authorized device access and a build matching the inspected board topology.
+  - The **mock-kscan** profile supplies scripted events, including chatter-like
+    bursts, for checking Info/Device(type=MOCK)/PositionMap/Stats over USB RPC.
+    Synthetic scan input does not establish physical switch behavior.
+  - The direct-kscan tester profile permits comparing GpioPins with its declared
+    `xiao_d` wiring. A separately authorized physical input can check stats
+    end-to-end after its electrical configuration has been verified.
+  - Derive flash layout, bootloader boundaries and debug symbols from the exact
+    selected artifact. A local partition workaround or debug procedure is not
+    a universal project requirement. The mock build's startup logging and RTT
+    options are fixture settings, not proof of delivery, timing or retention.
 
 ## 9. Phase plan (subagent handoff)
 
@@ -364,20 +368,16 @@ pre-commit run --all-files` + run the npm checks directly.
     `zmk-feature-watchdog`'s `IncidentType` enum. This broke `npm run build`
     at the start of Phase D (before any Phase D code was added) and was
     fixed as a minimal, in-scope correction.
-  - **GHOST rule** only fires when the wizard is given an explicit
-    `requestedPositions` set (so it can tell "unexpected" presses apart);
-    `TestWizard` always supplies one (`positionsUnderTest`), but a
-    DiagnosisEngine caller that omits it silently skips GHOST rather than
-    erroring — documented as a deliberate "opt-in" design in
-    `diagnosis/types.ts`, not a bug.
-- **E — hardware validation** (§8) — **done**: mock build
-  (`kscan_diagnostics_board_hw_mock`, new snippet `diag-hw-mock`) and the
-  existing direct-kscan build (`kscan_diagnostics_board_with_rpc`) flashed to
-  the rig's XIAO over SWD; full RPC chain (Info/Layout/Device/GpioPins/
-  PositionMap/GetStats/ResetStats) exercised over real USB via
-  `tools/zmk-studio-rpc --transport pyusb`; transcripts in
-  `docs/validation.md`. Deviations found and fixed along the way (both in
-  `docs/validation.md` in detail):
+  - **GHOST rule** needs an explicit requested subset and event window. The
+    optional Ghost check records those separately from free coverage, asking
+    for three rectangle corners while leaving the selected target untouched.
+    Without that check, `requestedPositions` is omitted and GHOST is skipped.
+- **E — hardware acceptance** (§8): use the mock profile
+  (`kscan_diagnostics_board_hw_mock`, snippet `diag-hw-mock`) separately from
+  actual physical switch input. Validate the full RPC chain against the
+  declared topology using the procedure in `docs/validation.md`. This document
+  does not publish individual device histories or claim a new hardware result.
+  Relevant reproducible constraints:
   - **Bug**: `proto/cormoran/kscan-diagnostics/` (hyphen) broke
     `tools/zmk-studio-rpc custom-call`'s proto loader (tries to import an
     invalid Python module path). Renamed to
@@ -387,13 +387,12 @@ pre-commit run --all-files` + run the npm checks directly.
   - **Test-script pitfall, not a firmware bug**: `zmk,kscan-mock`'s `events`
     DT array is one-event-behind (each `events[i]`'s delay controls the wait
     before event `i+1`, not event `i`; `events[0]`'s delay is consumed
-    twice; the last event's delay is never consumed) -- discovered when an
-    initial hardware event script's `GetStats` results looked swapped.
+    twice; the last event's delay is never consumed).
     `tests/test.dtsi`'s native_sim fixture has the same shift but its
-    tolerant assertion ranges absorb it either way. Fixed the hardware
-    script (`diag-hw-mock.overlay`) accordingly and added
-    `src/test/kscan_mock_timing_test.c` (`tests/mock-timing/`) to pin the
-    real model down as a regression test.
+    tolerant assertion ranges permit that model. The board mock
+    script (`diag-hw-mock.overlay`) uses it too.
+    `src/test/kscan_mock_timing_test.c` (`tests/mock-timing/`) checks the
+    scheduling model as a regression test.
 - **F — docs + PR**: README user guide (how to add the module + west.yml
   example, how to run a diagnosis session), then PR to origin.
 
@@ -468,22 +467,28 @@ PC ◄── PeripheralEvent notification (one per responding peripheral)
 - **Two relay carriers** (`include/cormoran/kscan_diagnostics/relay_events.h`):
   `ksd_relay_query` (id `K2q`, central→peripheral) and `ksd_relay_reply`
   (id `K2r`, peripheral→central), each holding `{source, req_id, len, data[]}`.
-  The packed version 2 carriers retain the full uint32 RPC request ID. The old
+  The packed version 2 carriers retain a uint32 central-owned ticket. The central
+  maps that fresh ticket back to the complete client request ID. The old
   `KDq`/`KDr` carriers narrowed it to a byte; distinct identifiers prevent a
   mixed-version split from interpreting the new layout as the old one. Both
   halves must use the same module revision; the public protobuf is unchanged.
   The whole struct is copied into the relay payload, so the reply's `data`
   (sized to the largest inner Response, ~180 B) forces
-  `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256` (the relay transport chunks it
+  `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=240` (the relay transport chunks it
   across the link; a `BUILD_ASSERT` + README note cover the config). The four
   relay macros in `src/split/kscan_diagnostics_relay.c` are self-role-gating,
   so one TU compiles correctly on either role.
 - **Kconfig**: `ZMK_KSCAN_DIAGNOSTICS_SPLIT` (default y under `ZMK_SPLIT`)
   `select`s `ZMK_SPLIT_RELAY_EVENT` and `NANOPB`. Central notification path is
   additionally gated on `ZMK_KSCAN_DIAGNOSTICS_STUDIO_RPC`.
-- **Security**: unchanged — the subsystem follows the central's setting
-  (`SECURED` by default, opt-in `UNSECURED`); peripheral topology/aggregate
-  counters are no more sensitive than the central's.
+- **Security/lifetime**: the subsystem follows the central's setting
+  (`SECURED` by default, opt-in `UNSECURED`). Four pending tickets expire after
+  5 seconds by default. Lock/output changes clear them and the queue; replies
+  must match a live ticket and a peer may answer once. Receive-side inner
+  lengths are bounded independently of the outer carrier. A captured epoch
+  and deadline are rechecked at the first encoder pass, then kept fixed across
+  sizing/output to avoid a truncated frame. The core TX call is synchronous
+  and cannot be cancelled here; Serial close has no module notification.
 - **Threading**: the relay carriers are re-raised by the split relay-receive
   path on the **system work queue** (~2 KB). Answering a query and (on the
   central) raising a Studio notification -- `raise_zmk_studio_custom_notification`
@@ -491,16 +496,15 @@ PC ◄── PeripheralEvent notification (one per responding peripheral)
   double `pb_encode` synchronously -- needs an RPC-thread-sized stack, so the
   event listeners only enqueue to a `k_msgq` and the heavy work runs on a
   dedicated `ksd_relay` work queue (`ZMK_KSCAN_DIAGNOSTICS_RELAY_STACK_SIZE`,
-  default 4096). Doing it inline on sysworkq overflows its stack (observed on
-  hardware).
-- **Testing** (§8): the relay round-trip needs two firmware images, so
-  native_sim covers `ksd_query_dispatch` (unchanged), and two build-test
+  default 4096). This moves the RPC-sized allocation off the system stack;
+  physical transport acceptance remains separate.
+- **Testing** (§8): real-kernel native fixtures cover relay receive/worker
+  bounds, pending reply retirement, sizing/output lifetime and topology
+  offsets/fallbacks with controlled transport and keymap boundaries. Normal
+  and ASan/UBSan variants run each binary three times. Two build-test
   artifacts (`kscan_diagnostics_board_split_central` /
   `..._split_peripheral`) prove both role gatings + the `BUILD_ASSERT`s
-  compile. The functional two-board round-trip is **not yet hardware-validated**:
-  a validation attempt could not boot a split BLE central on the workspace rig
-  (nRF52840 BLE-controller HardFault at boot, independent of this module --
-  the rig's BLE was in a degraded/connection-churn state), so it is deferred
-  until the rig's BLE is healthy or a known-good split pair is available.
+  compile. The actual two-board transport round-trip, physical wiring and
+  timing still require separately authorized device acceptance.
 - **Out of scope here**: the web UI that issues `QueryPeripheral` and renders
   peripheral topology/wiring (follow-up).
